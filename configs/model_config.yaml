@@ -32,8 +32,9 @@ routing:
 vibe_cli:
   command: vibe
   output: json
-  max_turns: 1
+  max_turns: 6
   max_price: null
+  sandbox: workspace-write
   enabled_tools: []
 
 codex_cli:

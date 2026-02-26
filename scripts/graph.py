@@ -186,6 +186,50 @@ def detect_current_story_id(state: QAState) -> str:
     return ""
 
 
+def _sanitize_report_token(raw: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_-]+", "_", raw.strip())
+    token = token.strip("_").lower()
+    return token
+
+
+def _extract_report_token_from_report_ref(report_ref: str) -> str:
+    ref = report_ref.strip().strip("/")
+    if not ref:
+        return ""
+
+    parts = list(Path(ref).parts)
+    lower_parts = [p.lower() for p in parts]
+    for i in range(len(lower_parts) - 2):
+        if lower_parts[i] == "docs" and lower_parts[i + 1] == "reports" and lower_parts[i + 2] == "qa":
+            if i + 3 < len(parts):
+                return _sanitize_report_token(parts[i + 3])
+
+    p = Path(ref)
+    fallback = p.stem if p.suffix else p.name
+    return _sanitize_report_token(fallback)
+
+
+def resolve_vibe_report_output_dir(state: QAState) -> Path:
+    active = _find_active_work_order()
+    if active and active.exists():
+        report_ref = _extract_report_path_from_work_order(read_text(active))
+        token = _extract_report_token_from_report_ref(report_ref) if report_ref else ""
+        if token:
+            return ROOT / "docs" / "reports" / "qa" / token
+
+    path_hint = " ".join([str(state.get("dev_docs_path", "")), str(state.get("audit_docs_path", ""))])
+    m = re.search(r"((?:sto|story)\d{4}_pr\d+)", path_hint, flags=re.IGNORECASE)
+    if m:
+        token = _sanitize_report_token(m.group(1))
+        if token:
+            return ROOT / "docs" / "reports" / "qa" / token
+
+    story = detect_current_story_id(state) or "story0000"
+    run_id = str(state.get("run_id", "")).replace("qa-", "pr")
+    token = _sanitize_report_token(f"{story}_{run_id}") or "story0000_pr00"
+    return ROOT / "docs" / "reports" / "qa" / token
+
+
 def _resolve_document_ref(doc_ref: str, state: QAState) -> tuple[dict[str, str], list[str]]:
     ref = doc_ref.strip()
     if not ref:
@@ -1313,6 +1357,30 @@ def should_use_kilocode_cli(persona: dict[str, Any], model_cfg: dict[str, Any]) 
     return any(token in hint for token in hints)
 
 
+def resolve_vibe_sandbox_mode(vibe_cfg: dict[str, Any]) -> str:
+    raw = str(vibe_cfg.get("sandbox", "read-only")).strip().lower()
+    if raw in {"read-only", "workspace-write", "danger-full-access"}:
+        return raw
+    return "read-only"
+
+
+def resolve_vibe_enabled_tools(vibe_cfg: dict[str, Any], sandbox_mode: str) -> tuple[list[str], bool]:
+    raw_tools = vibe_cfg.get("enabled_tools", [])
+    if not isinstance(raw_tools, list):
+        raw_tools = []
+    tools = [str(t).strip() for t in raw_tools if str(t).strip()]
+
+    # In read-only mode, enforce an explicit read-only allowlist unless one is provided.
+    if sandbox_mode == "read-only":
+        if tools:
+            return tools, True
+        return ["read_file", "grep", "bash", "task", "todo"], True
+
+    # For write/full-access modes, allow full toolset by default.
+    # If enabled_tools is explicitly provided, treat it as an allowlist.
+    return tools, bool(tools)
+
+
 def call_vibe_cli(
     persona: dict[str, Any],
     state: QAState,
@@ -1358,8 +1426,21 @@ def call_vibe_cli(
             "script_packet": state.get("script_packet"),
         },
     }
+    report_dir = resolve_vibe_report_output_dir(state)
+    report_dir_rel = _to_rel_label(report_dir)
+    report_policy = (
+        "Report output policy:\n"
+        f"- Create directory: {report_dir_rel}\n"
+        f"- Save at least one markdown report file (*.md) inside {report_dir_rel}\n"
+        "- Perform this write directly via available tools before final answer\n"
+        "- Include `report_output_dir` and `report_files` in the final JSON response\n"
+    )
+    before_files = set()
+    if report_dir.exists():
+        before_files = {str(p.resolve()) for p in report_dir.rglob("*.md") if p.is_file()}
+
     full_prompt = (
-        f"{system_prompt}\n\nReturn JSON only.\n\n"
+        f"{system_prompt}\n\n{report_policy}\nReturn JSON only.\n\n"
         + json.dumps(human_payload, ensure_ascii=True, indent=2)
     )
 
@@ -1378,14 +1459,16 @@ def call_vibe_cli(
     if max_price is not None:
         cmd.extend(["--max-price", str(max_price)])
 
-    enabled_tools = vibe_cfg.get("enabled_tools", [])
-    if isinstance(enabled_tools, list):
+    sandbox_mode = resolve_vibe_sandbox_mode(vibe_cfg)
+    enabled_tools, enforce_allowlist = resolve_vibe_enabled_tools(vibe_cfg, sandbox_mode)
+    if enforce_allowlist:
         for tool_name in enabled_tools:
             cmd.extend(["--enabled-tools", str(tool_name)])
 
     env = os.environ.copy()
     env["VIBE_LOG_DIR"] = "/tmp"
     env["HOME"] = "/tmp"
+    env["VIBE_SANDBOX_MODE"] = sandbox_mode
     
     proc = subprocess.run(
         cmd,
@@ -1402,8 +1485,40 @@ def call_vibe_cli(
             "returncode": proc.returncode,
             "stderr": (proc.stderr or "").strip(),
             "stdout": (proc.stdout or "").strip(),
+            "sandbox_mode": sandbox_mode,
+            "enabled_tools": enabled_tools,
+            "tool_allowlist_enforced": enforce_allowlist,
+            "report_output_dir": report_dir_rel,
         }
-    return parse_vibe_cli_response(proc.stdout)
+    report_files = [str(p.resolve()) for p in report_dir.rglob("*.md")] if report_dir.exists() else []
+    if not report_files:
+        return {
+            "provider": "vibe_cli",
+            "error": "vibe_report_missing",
+            "stderr": f"No markdown report saved under {report_dir_rel}",
+            "stdout": (proc.stdout or "").strip(),
+            "sandbox_mode": sandbox_mode,
+            "enabled_tools": enabled_tools,
+            "tool_allowlist_enforced": enforce_allowlist,
+            "report_output_dir": report_dir_rel,
+        }
+
+    report_files_rel = sorted(_to_rel_label(Path(p)) for p in report_files)
+    new_files_rel = sorted(
+        _to_rel_label(Path(p))
+        for p in report_files
+        if p not in before_files
+    )
+
+    packet = parse_vibe_cli_response(proc.stdout)
+    if isinstance(packet, dict):
+        packet["sandbox_mode"] = sandbox_mode
+        packet["enabled_tools"] = enabled_tools
+        packet["tool_allowlist_enforced"] = enforce_allowlist
+        packet["report_output_dir"] = report_dir_rel
+        packet["report_files"] = report_files_rel
+        packet["new_report_files"] = new_files_rel
+    return packet
 
 
 def call_codex_cli(
