@@ -1,0 +1,12 @@
+services:
+  qa-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.qa
+    working_dir: /workspace
+    volumes:
+      - ../..:/workspace
+      - ../runtime/container:/qa-runtime
+    environment:
+      - CI=true
+      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright

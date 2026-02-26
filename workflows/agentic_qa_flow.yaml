@@ -15,9 +15,9 @@ testing_rules:
     - validate_testplan_generator_quality
     - decide_rerun_or_force_terminate_if_needed
   script_authoring_mode: story_only
-  script_output_root: test/playwright/tests/qa
+  script_output_root: playwright/test
   script_filename_pattern: sto00X_*.spec.ts
-  playwright_context_root: test/playwright
+  playwright_context_root: playwright
   required_execution_pattern:
     - npx playwright test
   artifact_expectations:
@@ -50,7 +50,7 @@ testplan_routing_rules:
   wait_for_testplan_completion: false
   target_directory: docs/testplans
   required_filename_pattern: sto00X_testplan.md
-  script_target_directory: test/playwright/tests/qa
+  script_target_directory: playwright/test
   script_required_filename_pattern: sto00X_*.spec.ts
   script_authoring_mode: story_only
   required_report_types:

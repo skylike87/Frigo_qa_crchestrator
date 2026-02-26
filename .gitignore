@@ -13,6 +13,11 @@ output/*.json
 output/matrix/
 runtime/
 
+# Playwright/Node artifacts
+playwright/node_modules/
+playwright/package-lock.json
+npm-debug.log*
+
 # Local databases
 db/*.db
 

@@ -17,6 +17,37 @@ This directory defines a LangChain/LangGraph QA orchestration for the flow you d
 - Workflow file: `.qa/workflows/agentic_qa_flow.yaml`
 - Runtime graph: `.qa/scripts/graph.py`
 
+## Submodule/Porting
+
+- This repository is intended to run as `<host-workspace>/.qa`.
+- Use one of:
+  - Git submodule (recommended)
+  - Symlink
+  - Copy
+- Full guide: `MIGRATION_SUBMODULE.md`
+- After mounting at `.qa`, run one-time host bootstrap:
+
+```bash
+bash .qa/scripts/bootstrap_host_workspace.sh
+```
+
+Bootstrap includes:
+- `.qa` placement validation
+- `playwright` directory and `playwright/test` directory creation
+- container runtime validation (`docker compose`) and container profile setup
+
+Host-local Playwright install is optional:
+
+```bash
+bash .qa/scripts/bootstrap_host_workspace.sh --with-playwright-install
+```
+
+Run QA commands in container:
+
+```bash
+bash .qa/scripts/run_in_qa_container.sh "flutter --version && node --version && npx playwright --version"
+```
+
 Main path:
 
 1. Testplan Routing Agent (DeepSeek-R1 inline generation)

@@ -4,8 +4,8 @@ model_hint: routing_agent
 role: "Own the final QA gate: execute generated Playwright scripts, publish final report, and control testplan follow-up (rerun or force-stop)."
 mission:
   - Load current story script_packet from SQLite qa_reports
-  - Resolve story-scoped Playwright scripts from test/playwright/tests/qa
-  - Execute Playwright test command set from test/playwright context and collect result artifacts (pass/fail, traces, screenshots when available)
+  - Resolve story-scoped Playwright scripts from playwright/test
+  - Execute Playwright test command set from playwright context and collect result artifacts (pass/fail, traces, screenshots when available)
   - Produce final test report with pass/fail and evidence
   - Validate whether testplan_generator output satisfies required quality/coverage contract for current story
   - If testplan output is missing or below contract, trigger rerun of testplan generator

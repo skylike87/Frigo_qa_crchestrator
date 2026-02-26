@@ -693,9 +693,9 @@ def build_script_routing_packet(state: QAState, sidecar: QAHistorySidecar) -> di
             "dispatch_order": ["test_scripter_codex"],
         },
         "authoring_mode": "story_only",
-        "target_script_directory": "test/playwright/tests/qa",
+        "target_script_directory": "playwright/test",
         "target_script_pattern": f"{story_token}_*.spec.ts",
-        "playwright_context_root": "test/playwright",
+        "playwright_context_root": "playwright",
         "sqlite_lookup_trace": {
             "enabled": sidecar.enabled,
             "run_id": run_id,
@@ -716,9 +716,9 @@ def build_script_routing_packet(state: QAState, sidecar: QAHistorySidecar) -> di
             "decision_packet": decision_packet or state.get("decision_packet", {}),
             "clerk_packet": clerk_packet or state.get("clerk_packet", {}),
             "authoring_mode": "story_only",
-            "target_script_directory": "test/playwright/tests/qa",
+            "target_script_directory": "playwright/test",
             "target_script_pattern": f"{story_token}_*.spec.ts",
-            "playwright_context_root": "test/playwright",
+            "playwright_context_root": "playwright",
             "routing_note": "Dispatched right after testplan assignment; do not wait for testplan completion.",
         },
     }
@@ -1082,8 +1082,8 @@ def build_tester_execution_packet(state: QAState, sidecar: QAHistorySidecar, dry
     story_id = detect_current_story_id(state) or "sto000x"
     script_routing_packet = state.get("script_routing_packet") if isinstance(state.get("script_routing_packet"), dict) else {}
     script_pattern = str(script_routing_packet.get("target_script_pattern", "")).strip() or f"{story_id}_*.spec.ts"
-    script_dir_rel = str(script_routing_packet.get("target_script_directory", "")).strip() or "test/playwright/tests/qa"
-    playwright_root_rel = str(script_routing_packet.get("playwright_context_root", "")).strip() or "test/playwright"
+    script_dir_rel = str(script_routing_packet.get("target_script_directory", "")).strip() or "playwright/test"
+    playwright_root_rel = str(script_routing_packet.get("playwright_context_root", "")).strip() or "playwright"
     script_dir = ROOT / script_dir_rel
     playwright_root = ROOT / playwright_root_rel
 
@@ -1627,9 +1627,9 @@ def call_codex_cli(
     persona_id = str(persona.get("id", "")).strip()
     story_only_mode = persona_id == "test_scripter_codex"
     script_routing_packet = state.get("script_routing_packet") if isinstance(state.get("script_routing_packet"), dict) else {}
-    target_script_dir = str(script_routing_packet.get("target_script_directory", "")).strip() or "test/playwright/tests/qa"
+    target_script_dir = str(script_routing_packet.get("target_script_directory", "")).strip() or "playwright/test"
     target_script_pattern = str(script_routing_packet.get("target_script_pattern", "")).strip() or "sto00X_*.spec.ts"
-    playwright_root = str(script_routing_packet.get("playwright_context_root", "")).strip() or "test/playwright"
+    playwright_root = str(script_routing_packet.get("playwright_context_root", "")).strip() or "playwright"
     access_policy = (
         f"파일 접근 정책: {target_script_dir} 디렉토리 내부에서만 테스트 스크립트를 생성/수정하라. "
         f"{target_script_dir} 외 경로에는 파일 생성/수정을 시도하지 마라. "

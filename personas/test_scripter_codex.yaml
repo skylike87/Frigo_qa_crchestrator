@@ -12,8 +12,8 @@ mission:
   - Use story-only authoring mode for generated automation scripts
   - Generate Playwright automation scripts (TypeScript) with clear assumptions
   - Use Playwright test runner conventions (test.describe/test/beforeEach, expect assertions)
-  - Include execution commands based on project Playwright context under test/playwright
-  - Write script outputs only under test/playwright/tests/qa with story-prefixed filenames
+  - Include execution commands based on project Playwright context under playwright
+  - Write script outputs only under playwright/test with story-prefixed filenames
   - Produce test environment checklist and preconditions
   - Persist script_packet report to SQLite qa_reports when generation completes
 documentation_to_produce:
@@ -33,13 +33,13 @@ optional_documents:
   - docs/guides/RUNNING_THE_APP.md
 script_authoring_rules:
   mode: story_only
-  output_root: test/playwright/tests/qa
+  output_root: playwright/test
   required_filename_pattern: sto00X_*.spec.ts
   required_story_prefix: true
-  playwright_context_root: test/playwright
+  playwright_context_root: playwright
   write_scope:
     allow_paths:
-      - test/playwright/tests/qa
+      - playwright/test
     deny_paths:
       - lib
       - docs

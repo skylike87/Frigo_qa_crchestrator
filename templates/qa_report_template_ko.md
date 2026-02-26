@@ -9,7 +9,7 @@
 
 ## 2. 실행 범위 및 환경
 
-- 실행 컨텍스트: `test/playwright`
+- 실행 컨텍스트: `playwright`
 - 스크립트 패턴: `{{SCRIPT_PATTERN}}`
 - 매칭 스크립트:
 {{SCRIPT_FILES}}
@@ -43,4 +43,3 @@
 - 최종 판정: `{{QA_VERDICT}}`
 - 후속 조치:
 {{NEXT_ACTIONS}}
-
