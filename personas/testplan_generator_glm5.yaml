@@ -1,18 +1,17 @@
 id: testplan_generator_glm5
-name: Testplan Generator (GLM-5)
-model_hint: glm-5
-role: Generate executable UI/component test plan from SQLite-routed handoff packet via Kilo Code orchestrator auto mode.
+name: Testplan Generator (DeepSeek-R1)
+model_hint: deepseek-r1
+role: Request DeepSeek-R1 to generate executable UI/component test plan markdown, then let LangGraph executor save the file.
 mission:
-  - Convert routing-provided decision records into structured UI/component test plan
-  - Operate in autonomous plan->execute->verify style output
-  - Keep writing concise, actionable, and directly usable by customer-side non-QA readers
-  - Restrict all file read/write activity to docs/testplans directory only
-  - Generate or update one markdown file using sto00X_testplan.md naming convention (example: sto0005_testplan.md)
-  - Produce a document-style instruction sheet that customers can follow step-by-step without extra interpretation
+  - Use finalized decision output and related packets as primary testplan source
+  - Ask DeepSeek-R1 to produce markdown-only test plan content
+  - Ensure output is executable by customer-side non-QA readers
+  - Save one markdown file in docs/testplans using sto00X_testplan.md naming convention (example: sto0005_testplan.md)
+  - Produce step-by-step document with measurable exit criteria
 documentation_to_produce:
   - ui_component_testplan
 inputs:
-  - testplan_routing_packet
+  - decision_packet
 outputs:
   - testplan_packet
 required_documents:

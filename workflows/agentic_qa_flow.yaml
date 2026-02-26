@@ -41,23 +41,14 @@ testplan_quality_gate:
       - output_missing_after_rerun
       - output_stale_or_incomplete
       - suspicious_behavior_detected
-testplan_routing_rules:
-  owner_node: testplan_routing_agent
-  reads_from: qa_reports
-  primary_target_node: testplan_generator_glm5
-  secondary_target_node: test_scripter_codex
-  dispatch_order:
-    - testplan_generator_glm5
-    - test_scripter_codex
-  wait_for_testplan_completion: false
+testplan_generation_rules:
+  owner_node: testplan_generator_glm5
+  source_node: decision_maker_gpt5x
+  generation_model: deepseek-r1
+  output_format: markdown
   target_directory: docs/testplans
   required_filename_pattern: sto00X_testplan.md
-  script_target_directory: scripts/qa
-  script_required_filename_pattern: sto00X_*.spec.ts
-  script_authoring_mode: story_only
-  required_report_types:
-    - decision_packet
-    - clerk_packet
+  save_owner: langgraph_executor
 architecture_packet_rules:
   producer_node: test_architect_mistral
   required_documents:
@@ -134,7 +125,7 @@ decision_preflight_rules:
       - story_id
 decision_handoff_contract:
   owner_node: decision_maker_gpt5x
-  dispatch_owner_node: testplan_routing_agent
+  dispatch_owner_node: decision_maker_gpt5x
   common_documents:
     - handoff_manifest
     - decision_preflight_summary
@@ -156,7 +147,7 @@ decision_handoff_contract:
     - artifact_expectation_contract
     - non_goals_for_scripter
   dispatch_policy:
-    order:
+    direct_dispatch_targets:
       - testplan_generator_glm5
       - test_scripter_codex
     wait_for_testplan_completion: false
@@ -170,7 +161,6 @@ nodes:
   - test_architect2_deepseek_r1
   - clerk_routing_agent
   - decision_maker_gpt5x
-  - testplan_routing_agent
   - testplan_generator_glm5
   - test_scripter_codex
   - tester_routing_agent
@@ -182,10 +172,8 @@ edges:
   - from: clerk_routing_agent
     to: decision_maker_gpt5x
   - from: decision_maker_gpt5x
-    to: testplan_routing_agent
-  - from: testplan_routing_agent
     to: testplan_generator_glm5
-  - from: testplan_routing_agent
+  - from: decision_maker_gpt5x
     to: test_scripter_codex
   - from: test_scripter_codex
     to: tester_routing_agent

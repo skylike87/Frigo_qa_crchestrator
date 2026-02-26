@@ -18,7 +18,7 @@ mission:
   - Confirm final testcase set
   - Filter PII-sensitive handling and policy violations
   - Enforce security guardrails before downstream generation
-  - Prepare structured handoff packets for routing agent to dispatch to testplan_generator_glm5 and test_scripter_codex
+  - Prepare structured handoff context for direct dispatch to testplan_generator_glm5 and test_scripter_codex
 documentation_to_produce:
   - handoff_manifest
   - decision_preflight_summary

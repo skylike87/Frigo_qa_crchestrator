@@ -1302,6 +1302,131 @@ def call_llm(
     return safe_json(content)
 
 
+def _extract_text_from_llm_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(x for x in parts if x).strip()
+    return str(content).strip()
+
+
+def _strip_markdown_fence(text: str) -> str:
+    raw = text.strip()
+    if raw.startswith("```") and raw.endswith("```"):
+        lines = raw.splitlines()
+        if len(lines) >= 2:
+            return "\n".join(lines[1:-1]).strip()
+    return raw
+
+
+def _resolve_testplan_target_rel_path(state: QAState) -> str:
+    routing_packet = state.get("testplan_routing_packet") if isinstance(state.get("testplan_routing_packet"), dict) else {}
+    target_rel_path = str(routing_packet.get("target_testplan_path", "")).strip()
+    if target_rel_path:
+        return target_rel_path
+    story_token = detect_current_story_id(state) or "sto000x"
+    return f"docs/testplans/{story_token}_testplan.md"
+
+
+def call_testplan_generator_executor(
+    persona: dict[str, Any],
+    state: QAState,
+    assigned_docs: dict[str, Any],
+    model_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+
+    model_name = resolve_model_name(persona, model_cfg, "deepseek-reasoner")
+    target_rel_path = _resolve_testplan_target_rel_path(state)
+    target_abs_path = (ROOT / target_rel_path).resolve()
+    target_abs_path.parent.mkdir(parents=True, exist_ok=True)
+
+    system_prompt = (
+        "너는 테스트플랜 작성 전용 에이전트다. "
+        "결정 완료된 문서와 중간 패킷을 바탕으로 실행 가능한 테스트플랜을 markdown(.md) 본문으로만 작성하라. "
+        "JSON, 코드블록 펜스, 설명 문장 없이 markdown 본문만 반환하라."
+    )
+    human_payload = {
+        "workflow": state.get("workflow_id"),
+        "run_id": state.get("run_id"),
+        "target_testplan_path": target_rel_path,
+        "format": "markdown",
+        "assigned_documents": assigned_docs.get("documents", {}),
+        "missing_docs": {
+            "required": assigned_docs.get("missing_required", []),
+            "optional": assigned_docs.get("missing_optional", []),
+        },
+        "inputs": {
+            "dev_docs": state.get("dev_docs", ""),
+            "audit_docs": state.get("audit_docs", ""),
+            "changed_files": state.get("changed_files", []),
+        },
+        "intermediate": {
+            "architecture_packet": state.get("architecture_packet"),
+            "adversarial_packet": state.get("adversarial_packet"),
+            "clerk_packet": state.get("clerk_packet"),
+            "decision_packet": state.get("decision_packet"),
+        },
+        "mandatory_sections": [
+            "Purpose",
+            "Scope",
+            "Prerequisites",
+            "Step-by-Step",
+            "How to Record Results",
+            "Exit and Success Criteria",
+        ],
+        "quality_constraints": [
+            "Include executable P0 test cases explicitly.",
+            "Include acceptance criteria traceability.",
+            "Keep steps concrete and directly runnable by human tester.",
+        ],
+    }
+
+    _, _, api_key, base_url = resolve_endpoint_config(model_cfg)
+    model = ChatOpenAI(
+        model=model_name,
+        temperature=float(model_cfg.get("temperature", 0.1)),
+        max_tokens=int(model_cfg.get("max_tokens", 1800)),
+        timeout=int(model_cfg.get("timeout_seconds", 60)),
+        api_key=api_key or None,
+        base_url=base_url or None,
+    )
+    resp = model.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=json.dumps(human_payload, ensure_ascii=True, indent=2)),
+    ])
+    markdown = _strip_markdown_fence(_extract_text_from_llm_content(resp.content)).strip()
+
+    if not markdown:
+        return {
+            "provider": "langgraph_executor",
+            "status": "failed",
+            "error": "empty_markdown_output",
+            "model": model_name,
+            "target_testplan_path": target_rel_path,
+        }
+
+    target_abs_path.write_text(markdown.rstrip() + "\n", encoding="utf-8")
+    line_count = len(markdown.splitlines())
+    size_bytes = len(markdown.encode("utf-8"))
+    return {
+        "provider": "langgraph_executor",
+        "status": "success",
+        "handoff_model": model_name,
+        "target_testplan_path": target_rel_path,
+        "saved": True,
+        "line_count": line_count,
+        "size_bytes": size_bytes,
+    }
+
+
 def parse_vibe_cli_response(stdout: str) -> dict[str, Any]:
     payload = safe_json(stdout)
     if not isinstance(payload, dict):
@@ -1996,6 +2121,8 @@ def node_fn(persona_id: str, packet_key: str, sidecar: QAHistorySidecar):
                     packet = call_vibe_cli(persona, state, model_cfg, assigned_docs)
                 elif should_use_kilocode_cli(persona, model_cfg):
                     packet = call_kilocode_cli(persona, state, model_cfg, assigned_docs)
+                elif persona_id == "testplan_generator_glm5":
+                    packet = call_testplan_generator_executor(persona, state, assigned_docs, model_cfg)
                 else:
                     api_key_env, _, api_key, _ = resolve_endpoint_config(model_cfg)
                     if not api_key:
@@ -2084,7 +2211,6 @@ def build_graph(_: dict[str, Any], sidecar: QAHistorySidecar):
     graph.add_node("test_architect2_deepseek_r1", node_fn("test_architect2_deepseek_r1", "adversarial_packet", sidecar))
     graph.add_node("clerk_routing_agent", node_fn("clerk_routing_agent", "clerk_packet", sidecar))
     graph.add_node("decision_maker_gpt5x", node_fn("decision_maker_gpt5x", "decision_packet", sidecar))
-    graph.add_node("testplan_routing_agent", node_fn("testplan_routing_agent", "testplan_routing_packet", sidecar))
     graph.add_node("testplan_generator_glm5", node_fn("testplan_generator_glm5", "testplan_packet", sidecar))
     graph.add_node("test_scripter_codex", node_fn("test_scripter_codex", "script_packet", sidecar))
     graph.add_node("tester_routing_agent", node_fn("tester_routing_agent", "execution_packet", sidecar))
@@ -2094,9 +2220,8 @@ def build_graph(_: dict[str, Any], sidecar: QAHistorySidecar):
     graph.add_edge("test_architect_mistral", "test_architect2_deepseek_r1")
     graph.add_edge("test_architect2_deepseek_r1", "clerk_routing_agent")
     graph.add_edge("clerk_routing_agent", "decision_maker_gpt5x")
-    graph.add_edge("decision_maker_gpt5x", "testplan_routing_agent")
-    graph.add_edge("testplan_routing_agent", "testplan_generator_glm5")
-    graph.add_edge("testplan_routing_agent", "test_scripter_codex")
+    graph.add_edge("decision_maker_gpt5x", "testplan_generator_glm5")
+    graph.add_edge("decision_maker_gpt5x", "test_scripter_codex")
     graph.add_edge("test_scripter_codex", "tester_routing_agent")
     graph.add_edge("tester_routing_agent", END)
 
@@ -2110,9 +2235,8 @@ def run_fallback_graph(initial_state: QAState, sidecar: QAHistorySidecar) -> QAS
         ("test_architect2_deepseek_r1", "adversarial_packet"),
         ("clerk_routing_agent", "clerk_packet"),
         ("decision_maker_gpt5x", "decision_packet"),
-        ("testplan_routing_agent", "testplan_routing_packet"),
-        ("test_scripter_codex", "script_packet"),
         ("testplan_generator_glm5", "testplan_packet"),
+        ("test_scripter_codex", "script_packet"),
         ("tester_routing_agent", "execution_packet"),
     ]
     for persona_id, packet_key in order:
