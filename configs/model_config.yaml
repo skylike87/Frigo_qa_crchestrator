@@ -1,0 +1,80 @@
+provider: openai
+model: gpt-5-mini
+temperature: 0.1
+max_tokens: 1800
+timeout_seconds: 60
+endpoint:
+  base_url: https://api.deepseek.com/v1
+  base_url_env: DEEPSEEK_BASE_URL
+  api_key: ""
+  api_key_env: GLOBAL_DEEPSEEK_KEY
+
+routing:
+  use_vibe_for_model_hints:
+    - mistral
+    - devstral
+  use_codex_cli_for_model_hints:
+    - codex
+    - gpt-5
+  use_kilocode_cli_for_model_hints:
+    - glm-5
+    - glm5
+  model_by_hint:
+    gpt-5x: gpt-5
+    gpt-5-mini: gpt-5-mini
+    gpt-5-nano: gpt-5-nano
+    codex: gpt-5.3-codex
+    deepseek-reasoner: deepseek-reasoner
+    deepseek-r1: deepseek-reasoner
+    glm-5: z-ai/glm-5:free
+    glm5: z-ai/glm-5:free
+
+vibe_cli:
+  command: vibe
+  output: json
+  max_turns: 1
+  max_price: null
+  enabled_tools: []
+
+codex_cli:
+  command: codex
+  model: gpt-5.3-codex
+  ask_for_approval: never
+  sandbox: read-only
+  output_schema_file: .qa/configs/codex_script_packet_schema.json
+  endpoint:
+    base_url: ""
+    base_url_env: OPENAI_BASE_URL
+    api_key: ""
+    api_key_env: OPENAI_API_KEY
+  extra_args: []
+
+kilocode_cli:
+  command: kilocode
+  subcommand: run
+  auto: true
+  format: json
+  model: z-ai/glm-5:free
+  timeout_flag: ""
+  timeout: 600
+  provider_env: KILO_PROVIDER
+  provider_value: ""
+  model_env: KILOCODE_MODEL
+  extra_args: []
+
+model_variants:
+  codex:
+    - gpt-5.3-codex
+    - gpt-5.3-codex-spark
+    - gpt-5.2-codex
+    - gpt-5.1-codex-max
+    - gpt-5.1-codex-mini
+  gpt5x:
+    - gpt-5
+    - gpt-5-mini
+    - gpt-5-nano
+
+output:
+  include_inputs: true
+  include_timestamps: true
+  include_persona_trace: true

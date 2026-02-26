@@ -1,0 +1,35 @@
+id: tester_routing_agent
+name: Tester (Routing Agent)
+model_hint: routing_agent
+role: "Own the final QA gate: execute generated Playwright scripts, publish final report, and control testplan follow-up (rerun or force-stop)."
+mission:
+  - Load current story script_packet from SQLite qa_reports
+  - Resolve story-scoped Playwright scripts from test/playwright/tests/qa
+  - Execute Playwright test command set from test/playwright context and collect result artifacts (pass/fail, traces, screenshots when available)
+  - Produce final test report with pass/fail and evidence
+  - Validate whether testplan_generator output satisfies required quality/coverage contract for current story
+  - If testplan output is missing or below contract, trigger rerun of testplan generator
+  - If rerun is non-recoverable or stale, force-terminate the process with explicit reason and status
+  - Persist test execution record to SQLite final_test table (create if missing)
+  - Store execution result and error_log in SQLite final_test record
+  - After tester execution, verify docs/testplans output for current story
+  - Check whether Kilo Code testplan task is complete; if needed rerun testplan generator or terminate stale Kilo Code process
+  - Block suspicious Kilo Code behaviors (privilege escalation, sandbox escape attempts)
+documentation_to_produce:
+  - final_test_report
+  - script_packet_lookup
+  - sqlite_final_test_store
+  - error_log
+  - testplan_followup
+  - testplan_quality_verdict
+  - process_control_action_log
+inputs:
+  - script_routing_packet
+outputs:
+  - execution_packet
+  - tester_gate_decision
+required_documents:
+  - docs/standards/DEFINITION_OF_DONE.md
+  - docs/ops/templates/REPORT_TEMPLATE.md
+optional_documents:
+  - docs/ops/AGENT_PLAYBOOK.md

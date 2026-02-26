@@ -1,0 +1,26 @@
+id: clerk_routing_agent
+name: Clerk (Routing Agent)
+model_hint: routing_agent
+role: Persist adversarial report to SQLite and merge both architect reports into a canonical routing packet.
+mission:
+  - Persist adversarial_packet to qa_reports in SQLite sidecar
+  - Load architecture_packet and adversarial_packet from SQLite (fallback to runtime packet when needed)
+  - Merge both architect reports into a canonical packet for decision gate
+  - Preserve provenance metadata (report ids/hash/time/path)
+  - Enforce security routing rules and flag suspicious privilege/sandbox-escape behaviors
+documentation_to_produce:
+  - sqlite_write_trace
+  - sqlite_lookup_trace
+  - merged_architect_packet
+  - routing_provenance
+inputs:
+  - architecture_packet
+  - adversarial_packet
+outputs:
+  - clerk_packet
+required_documents:
+  - docs/ops/templates/WORK_ORDER_TEMPLATE.md
+  - docs/ops/templates/REPORT_TEMPLATE.md
+  - .qa/db/schema.sql
+optional_documents:
+  - docs/ops/AGENT_PLAYBOOK.md

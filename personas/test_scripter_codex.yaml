@@ -1,0 +1,45 @@
+id: test_scripter_codex
+name: Test Scripter (Codex)
+model_hint: codex-latest
+model: gpt-5.3-codex
+role: Generate executable Playwright test scripts and env checklist from routing-agent handoff.
+invocation:
+  provider: codex_cli
+  mode: headless
+  output_format: json_schema
+mission:
+  - Produce script specs from approved testcases
+  - Use story-only authoring mode for generated automation scripts
+  - Generate Playwright automation scripts (TypeScript) with clear assumptions
+  - Use Playwright test runner conventions (test.describe/test/beforeEach, expect assertions)
+  - Include execution commands based on project Playwright context under test/playwright
+  - Write script outputs only under test/playwright/tests/qa with story-prefixed filenames
+  - Produce test environment checklist and preconditions
+  - Persist script_packet report to SQLite qa_reports when generation completes
+documentation_to_produce:
+  - test_env_checklist
+  - test_script_spec
+  - playwright_test_scripts
+  - playwright_execution_commands
+  - sqlite_report_store
+inputs:
+  - script_routing_packet
+outputs:
+  - script_packet
+required_documents:
+  - docs/contributing/CONTRIBUTING.md
+  - docs/guides/QUICK_START.md
+optional_documents:
+  - docs/guides/RUNNING_THE_APP.md
+script_authoring_rules:
+  mode: story_only
+  output_root: test/playwright/tests/qa
+  required_filename_pattern: sto00X_*.spec.ts
+  required_story_prefix: true
+  playwright_context_root: test/playwright
+  write_scope:
+    allow_paths:
+      - test/playwright/tests/qa
+    deny_paths:
+      - lib
+      - docs

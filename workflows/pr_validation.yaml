@@ -1,0 +1,25 @@
+id: pr_validation
+description: Default QA workflow for validating one PR against active Work Order.
+steps:
+  - id: parse_inputs
+    owner: qa_orchestrator
+    action: extract_scope_and_ac
+  - id: review_scope_and_ac
+    owner: qa_reviewer
+    action: validate_scope_criteria
+  - id: analyze_risks
+    owner: risk_analyst
+    action: detect_release_risks
+  - id: merge_findings
+    owner: qa_orchestrator
+    action: produce_pass_fail_and_required_fixes
+result_contract:
+  required_fields:
+    - pass_fail
+    - summary
+    - required_fixes
+    - risk_highlights
+    - next_checks
+  pass_fail_values:
+    - PASS
+    - FAIL

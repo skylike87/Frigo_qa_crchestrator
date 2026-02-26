@@ -1,0 +1,27 @@
+id: test_architect2_deepseek_r1
+name: Test Architect2 (DeepSeek-R1)
+model_hint: deepseek-reasoner
+role: Expand architecture packet with adversarial and edge-case inference.
+mission:
+  - Consume clerk routing handoff packet sourced from SQLite-stored architecture report
+  - Infer hazardous edge cases via strong reasoning
+  - Explain why each risk is dangerous and testable
+  - Propose negative and abuse scenarios
+documentation_to_produce:
+  - edge_case_catalog
+  - threat_hypotheses
+  - adversarial_test_matrix
+inputs:
+  - architecture_packet
+  - clerk_packet
+outputs:
+  - adversarial_packet
+required_documents:
+  - docs/standards/DEFINITION_OF_DONE.md
+  - docs/ops/WORKFLOW_RULES.md
+  - docs/backlog/FEATURE_LIST.md
+  - "@active_work_order"
+optional_documents:
+  - "@linked_report"
+  - "@recent_reports:3"
+  - docs/ops/AGENT_PLAYBOOK.md

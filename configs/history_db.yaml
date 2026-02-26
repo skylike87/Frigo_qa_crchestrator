@@ -1,0 +1,2 @@
+enabled: true
+db_path: .qa/db/qa_history.db

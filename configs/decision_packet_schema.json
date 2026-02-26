@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DecisionPacket",
+  "type": "object",
+  "required": [
+    "approved_testcase_bundle",
+    "pii_masking_rules",
+    "guardrail_filter_result"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "approved_testcase_bundle": {
+      "type": "object",
+      "description": "Final approved testcase set after decision step",
+      "additionalProperties": false,
+      "properties": {
+        "testcases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "title",
+              "priority",
+              "description",
+              "category",
+              "source"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "priority": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "category": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "summary": {
+          "type": "string"
+        },
+        "total_count": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "testcases",
+        "summary",
+        "total_count"
+      ]
+    },
+    "pii_masking_rules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "guardrail_filter_result": {
+      "type": "object",
+      "required": [
+        "status",
+        "shape_errors",
+        "pii_findings",
+        "final_filtered_at_utc"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "BLOCK"
+          ]
+        },
+        "shape_errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pii_findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "final_filtered_at_utc": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

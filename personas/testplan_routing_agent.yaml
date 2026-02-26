@@ -1,0 +1,28 @@
+id: testplan_routing_agent
+name: Testplan Routing Agent
+model_hint: routing_agent
+role: Fetch decision-related records from SQLite and dispatch deterministic handoff packets to both testplan generator and test scripter.
+mission:
+  - Read required records from qa_reports for current run/story
+  - Assign testplan work to testplan_generator_glm5 first
+  - Assign scripting work to test_scripter_codex immediately after assignment to testplan_generator_glm5
+  - Do not wait for testplan_generator_glm5 completion before assigning test_scripter_codex
+  - Build routing packets from SQLite lookups with provenance metadata
+  - For test_scripter_codex, enforce story-only script authoring contract (test/playwright/tests/qa + sto00X_*.spec.ts)
+  - Pass only validated, structured payload to downstream generator/scripter nodes
+documentation_to_produce:
+  - sqlite_lookup_trace
+  - testplan_routing_packet
+  - script_routing_packet
+  - dispatch_trace
+  - routing_provenance
+inputs:
+  - decision_packet
+outputs:
+  - testplan_routing_packet
+  - script_routing_packet
+required_documents:
+  - .qa/db/schema.sql
+  - docs/ops/templates/REPORT_TEMPLATE.md
+optional_documents:
+  - docs/ops/AGENT_PLAYBOOK.md
