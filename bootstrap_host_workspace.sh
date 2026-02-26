@@ -62,7 +62,7 @@ mkdir -p \
   "${CONTAINER_RUNTIME_DIR}"
 
 if [[ -f "${QA_DIR}/db/schema.sql" && ! -f "${QA_DIR}/db/qa_history.db" ]]; then
-  python3 "${QA_DIR}/scripts/init_history_db.py" --db-path "${QA_DIR}/db/qa_history.db"
+  python3 "${QA_DIR}/startup/init_history_db.py" --db-path "${QA_DIR}/db/qa_history.db"
 fi
 
 if [[ "${LOCAL_PLAYWRIGHT_INSTALL}" == "true" ]]; then
@@ -108,7 +108,7 @@ Bootstrap complete.
 Next:
 1) Put input docs under docs/ops/work_orders and audit docs path.
 2) (Container) run command:
-   bash .qa/scripts/run_in_qa_container.sh "flutter --version && node --version && npx playwright --version"
+   bash .qa/startup/run_in_qa_container.sh "flutter --version && node --version && npx playwright --version"
 3) Run dry-run:
    python .qa/scripts/graph.py --workflow agentic_qa_flow --dev-docs <work_order.md> --audit-docs <audit.md> --out .qa/output/graph_dry_run.json --dry-run
 EOF

@@ -196,7 +196,7 @@ python .qa/scripts/graph.py \
 - Init command:
 
 ```bash
-python .qa/scripts/init_history_db.py --db-path .qa/db/qa_history.db
+python .qa/startup/init_history_db.py --db-path .qa/db/qa_history.db
 ```
 
 - Sidecar layer:

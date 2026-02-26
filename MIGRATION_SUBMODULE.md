@@ -56,13 +56,13 @@ What it does:
 Run commands inside QA container:
 
 ```bash
-bash .qa/scripts/run_in_qa_container.sh "flutter --version && node --version && npx playwright --version"
+bash .qa/startup/run_in_qa_container.sh "flutter --version && node --version && npx playwright --version"
 ```
 
 Open interactive shell:
 
 ```bash
-bash .qa/scripts/run_in_qa_container.sh
+bash .qa/startup/run_in_qa_container.sh
 ```
 
 ## Verification

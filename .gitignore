@@ -23,3 +23,7 @@ db/*.db
 
 # OS/editor
 .DS_Store
+
+# Environment secrets
+.env
+.env.*
