@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -53,17 +52,6 @@ def main() -> None:
         env[args.base_url_env] = args.base_url
     if args.api_key:
         env[args.api_key_env] = args.api_key
-
-    # Copy codex auth files to /tmp/.codex/ when HOME is overridden
-    real_home = Path.home()
-    try:
-        os.makedirs("/tmp/.codex", exist_ok=True)
-        for cfg_file in ["config.toml", "auth.json"]:
-            src = real_home / ".codex" / cfg_file
-            if src.exists():
-                shutil.copy2(str(src), f"/tmp/.codex/{cfg_file}")
-    except Exception:
-        pass
 
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
 

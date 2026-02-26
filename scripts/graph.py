@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -165,33 +166,6 @@ def _extract_story_id_from_work_order(work_order_text: str) -> str:
     return (m.group(1).strip().lower() if m else "")
 
 
-def _extract_slug_from_work_order(work_order_text: str) -> str:
-    m = re.search(
-        r"^\s*-\s*(?:\*\*)?Slug(?:\*\*)?\s*:\s*`?([A-Za-z0-9_-]+)`?\s*$",
-        work_order_text,
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-    return (m.group(1).strip().lower() if m else "")
-
-
-def _sanitize_slug(value: str) -> str:
-    token = re.sub(r"[^a-z0-9_-]+", "-", value.strip().lower())
-    token = re.sub(r"-{2,}", "-", token).strip("-")
-    return token or "unnamed"
-
-
-def resolve_qa_report_path(state: QAState, story_id: str) -> Path:
-    work_order_text = str(state.get("dev_docs", ""))
-    slug = _extract_slug_from_work_order(work_order_text)
-    if not slug:
-        report_ref = _extract_report_path_from_work_order(work_order_text)
-        m = re.search(rf"({story_id})_pr\d+_([^/]+)_report\.md$", report_ref, flags=re.IGNORECASE)
-        if m:
-            slug = m.group(2).strip().lower()
-    slug = _sanitize_slug(slug if slug else "qa")
-    return ROOT / "docs" / "reports" / f"{story_id}_qa_{slug}.md"
-
-
 def detect_current_story_id(state: QAState) -> str:
     for key in ("dev_docs_path", "audit_docs_path"):
         raw = str(state.get(key, "")).strip()
@@ -324,6 +298,17 @@ PII_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("api_key", re.compile(r"\b(?:sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z\-_]{20,})\b")),
 ]
 
+KILOCODE_SECURITY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("privilege_escalation_sudo", re.compile(r"\bsudo\b", re.IGNORECASE)),
+    ("privilege_escalation_su", re.compile(r"\bsu\s+-?\b", re.IGNORECASE)),
+    ("dangerous_permission_change", re.compile(r"\bchmod\s+777\b", re.IGNORECASE)),
+    ("root_ownership_change", re.compile(r"\bchown\s+root\b", re.IGNORECASE)),
+    ("destructive_root_delete", re.compile(r"\brm\s+-rf\s+/\b", re.IGNORECASE)),
+    ("sudoers_modification", re.compile(r"/etc/sudoers", re.IGNORECASE)),
+    ("shell_pipe_exec", re.compile(r"\b(?:curl|wget)\b[^\n]{0,120}\|\s*(?:sh|bash)\b", re.IGNORECASE)),
+]
+
+
 def redact_text(text: str) -> str:
     out = text
     out = PII_PATTERNS[0][1].sub("[REDACTED_EMAIL]", out)
@@ -393,8 +378,99 @@ def enforce_decision_guardrails(packet: dict[str, Any]) -> dict[str, Any]:
     return packet
 
 
+def _collect_text_fragments(value: Any, bag: list[str], limit: int = 5000) -> None:
+    if len(" ".join(bag)) >= limit:
+        return
+    if isinstance(value, str):
+        bag.append(value[:1000])
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_text_fragments(item, bag, limit=limit)
+            if len(" ".join(bag)) >= limit:
+                return
+        return
+    if isinstance(value, dict):
+        for v in value.values():
+            _collect_text_fragments(v, bag, limit=limit)
+            if len(" ".join(bag)) >= limit:
+                return
+
+
+def detect_kilocode_security_violations(state: QAState) -> list[str]:
+    findings: list[str] = []
+    candidate_keys = ("testplan_packet",)
+    for key in candidate_keys:
+        packet = state.get(key)
+        if not isinstance(packet, dict):
+            continue
+        if str(packet.get("provider", "")).strip() != "kilocode_cli":
+            continue
+
+        fragments: list[str] = []
+        _collect_text_fragments(packet.get("assistant_text"), fragments)
+        _collect_text_fragments(packet.get("raw_stdout"), fragments)
+        _collect_text_fragments(packet.get("events"), fragments)
+        haystack = "\n".join(fragments)
+        for label, pattern in KILOCODE_SECURITY_PATTERNS:
+            if pattern.search(haystack):
+                findings.append(f"{key}: {label}")
+    return findings
+
+
 def _packet_json(packet: dict[str, Any]) -> str:
     return json.dumps(packet, ensure_ascii=False, indent=2)
+
+
+def _kilocode_pidfile_path() -> Path:
+    runtime_dir = QA_DIR / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_dir / "kilocode_testplan.pid.json"
+
+
+def _write_kilocode_pidfile(pid: int, cwd: str, story_id: str) -> None:
+    payload = {
+        "pid": int(pid),
+        "cwd": cwd,
+        "story_id": story_id,
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    _kilocode_pidfile_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_kilocode_pidfile() -> dict[str, Any] | None:
+    path = _kilocode_pidfile_path()
+    if not path.exists():
+        return None
+    try:
+        data = safe_json(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    if isinstance(data, dict) and not data.get("parse_error"):
+        return data
+    return None
+
+
+def _clear_kilocode_pidfile() -> None:
+    path = _kilocode_pidfile_path()
+    if path.exists():
+        path.unlink(missing_ok=True)
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _terminate_pid(pid: int) -> bool:
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except OSError:
+        return False
 
 
 def persist_architecture_report(sidecar: QAHistorySidecar, run_id: str, packet: dict[str, Any]) -> dict[str, Any]:
@@ -475,20 +551,14 @@ def build_clerk_merge_packet(state: QAState, sidecar: QAHistorySidecar) -> dict[
     story_id = detect_current_story_id(state)
 
     runtime_adversarial = state.get("adversarial_packet") or {}
-    write_trace = None
-    if runtime_adversarial:
-        write_trace = persist_adversarial_report_by_clerk(
-            sidecar=sidecar,
-            run_id=run_id,
-            packet=runtime_adversarial if isinstance(runtime_adversarial, dict) else {"raw": str(runtime_adversarial)},
-        )
+    write_trace = persist_adversarial_report_by_clerk(
+        sidecar=sidecar,
+        run_id=run_id,
+        packet=runtime_adversarial if isinstance(runtime_adversarial, dict) else {"raw": str(runtime_adversarial)},
+    )
 
     arch_latest = sidecar.get_latest_report(run_id=run_id, report_type="architecture_packet") if run_id else None
-    if not arch_latest:
-        arch_latest = sidecar.get_latest_report_any_run(report_type="architecture_packet")
     adv_latest = sidecar.get_latest_report(run_id=run_id, report_type="adversarial_packet") if run_id else None
-    if not adv_latest:
-        adv_latest = sidecar.get_latest_report_any_run(report_type="adversarial_packet")
 
     architecture_from_db: dict[str, Any] | None = None
     if arch_latest and isinstance(arch_latest.get("content_text"), str):
@@ -636,7 +706,7 @@ def build_testplan_routing_packet(state: QAState, sidecar: QAHistorySidecar) -> 
         "provider": "routing_agent",
         "status": "ready_for_testplan",
         "story_id": story_id,
-        "handoff_target": "testplan_routing_agent_inline_deepseek",
+        "handoff_target": "testplan_generator_glm5",
         "target_testplan_path": target_rel_path,
         "sqlite_lookup_trace": {
             "enabled": sidecar.enabled,
@@ -690,12 +760,12 @@ def build_script_routing_packet(state: QAState, sidecar: QAHistorySidecar) -> di
         "handoff_target": "test_scripter_codex",
         "dispatch_policy": {
             "wait_for_testplan_completion": False,
-            "dispatch_order": ["test_scripter_codex"],
+            "dispatch_order": ["testplan_generator_glm5", "test_scripter_codex"],
         },
         "authoring_mode": "story_only",
-        "target_script_directory": "playwright/test",
+        "target_script_directory": "scripts/qa",
         "target_script_pattern": f"{story_token}_*.spec.ts",
-        "playwright_context_root": "playwright",
+        "playwright_context_root": "test/playwright",
         "sqlite_lookup_trace": {
             "enabled": sidecar.enabled,
             "run_id": run_id,
@@ -716,9 +786,9 @@ def build_script_routing_packet(state: QAState, sidecar: QAHistorySidecar) -> di
             "decision_packet": decision_packet or state.get("decision_packet", {}),
             "clerk_packet": clerk_packet or state.get("clerk_packet", {}),
             "authoring_mode": "story_only",
-            "target_script_directory": "playwright/test",
+            "target_script_directory": "scripts/qa",
             "target_script_pattern": f"{story_token}_*.spec.ts",
-            "playwright_context_root": "playwright",
+            "playwright_context_root": "test/playwright",
             "routing_note": "Dispatched right after testplan assignment; do not wait for testplan completion.",
         },
     }
@@ -796,193 +866,6 @@ def _build_testplan_quality_verdict(check: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _render_text_template(template_text: str, values: dict[str, str]) -> str:
-    rendered = template_text
-    for key, val in values.items():
-        rendered = rendered.replace(f"{{{{{key}}}}}", str(val))
-    return rendered
-
-
-def build_qa_report_markdown_ko(
-    *,
-    state: QAState,
-    story_id: str,
-    script_pattern: str,
-    script_files: list[str],
-    commands: list[str],
-    execution_results: list[dict[str, Any]],
-    result_status: str,
-    pass_count: int,
-    fail_count: int,
-    error_text: str,
-    testplan_followup: dict[str, Any],
-    tester_gate_decision: dict[str, Any],
-) -> str:
-    run_id = str(state.get("run_id", ""))
-    work_order_text = str(state.get("dev_docs", ""))
-    report_ref = _extract_report_path_from_work_order(work_order_text)
-    gate_status = str(tester_gate_decision.get("testplan_gate_status", "")).strip() or "unknown"
-    qa_verdict = str(tester_gate_decision.get("qa_verdict", "")).strip() or "fail"
-
-    cmd_lines = "\n".join(f"- `{x}`" for x in commands) if commands else "- (없음)"
-    script_lines = "\n".join(f"- `{x}`" for x in script_files) if script_files else "- (매칭된 스크립트 없음)"
-    result_lines = []
-    for row in execution_results:
-        rc = row.get("returncode")
-        cmd = str(row.get("command", "")).strip()
-        dry = bool(row.get("dry_run"))
-        if dry:
-            result_lines.append(f"- `{cmd}` -> dry_run")
-        else:
-            result_lines.append(f"- `{cmd}` -> returncode={rc}")
-    result_block = "\n".join(result_lines) if result_lines else "- (실행 결과 없음)"
-
-    quality = testplan_followup.get("testplan_quality_verdict", {}) if isinstance(testplan_followup, dict) else {}
-    failed_checks = quality.get("failed_checks", []) if isinstance(quality, dict) else []
-    failed_lines = "\n".join(f"- `{x}`" for x in failed_checks) if failed_checks else "- 없음"
-    reason_code = str(tester_gate_decision.get("reason_code", "")).strip() or "(없음)"
-    error_block = f"- {error_text}" if error_text else "- 에러 로그 없음"
-
-    next_actions: list[str] = []
-    if qa_verdict.lower() == "pass":
-        next_actions.append("스토리 QA 게이트 통과 상태를 공유하고, 배포 전 최종 확인만 진행합니다.")
-    else:
-        next_actions.append("실패 원인에 해당하는 스크립트/게이트 항목을 우선 수정합니다.")
-    if gate_status in {"pending_manual_check", "manual_review"}:
-        next_actions.append("테스트플랜 품질 게이트는 수동 검토가 필요합니다.")
-    if fail_count > 0:
-        next_actions.append("실패 케이스 재현 로그를 기반으로 수정 후 재실행합니다.")
-    next_action_lines = "\n".join(f"- {x}" for x in next_actions) if next_actions else "- 없음"
-
-    template_path = QA_DIR / "templates" / "qa_report_template_ko.md"
-    template_text = read_text(template_path)
-    if not template_text:
-        # Fallback keeps report generation resilient even if template file is missing.
-        template_text = (
-            "# QA 최종 보고서: {{STORY_ID}}\n\n"
-            "- Run ID: `{{RUN_ID}}`\n"
-            "- Story: `{{STORY_ID}}`\n"
-            "- QA Verdict: `{{QA_VERDICT}}`\n"
-            "- Execution Status: `{{RESULT_STATUS}}`\n"
-        )
-
-    # Keep writer prompt file discoverable for future LLM-based report generation workflows.
-    _ = read_text(QA_DIR / "prompts" / "system" / "qa_report_writer_ko.txt")
-
-    values = {
-        "RUN_ID": run_id,
-        "STORY_ID": story_id,
-        "SOURCE_REPORT_REF": report_ref or "(work order report 경로 없음)",
-        "GENERATED_AT_UTC": datetime.now(timezone.utc).isoformat(),
-        "SCRIPT_PATTERN": script_pattern,
-        "SCRIPT_FILES": script_lines,
-        "COMMANDS": cmd_lines,
-        "RESULT_STATUS": result_status,
-        "PASS_COUNT": str(pass_count),
-        "FAIL_COUNT": str(fail_count),
-        "QA_VERDICT": qa_verdict,
-        "TESTPLAN_GATE_STATUS": gate_status,
-        "RESULT_LINES": result_block,
-        "FAILED_CHECKS": failed_lines,
-        "REASON_CODE": reason_code,
-        "ERROR_LOG": error_block,
-        "NEXT_ACTIONS": next_action_lines,
-    }
-    return _render_text_template(template_text, values).rstrip() + "\n"
-
-
-def generate_testplan_via_deepseek(state: QAState, sidecar: QAHistorySidecar, run_id: str) -> dict[str, Any]:
-    story_id = detect_current_story_id(state) or "sto000x"
-    testplan_md_path = ROOT / "docs" / "testplans" / f"{story_id}_testplan.md"
-    testplan_md_path.parent.mkdir(parents=True, exist_ok=True)
-
-    decision_packet = state.get("decision_packet") if isinstance(state.get("decision_packet"), dict) else {}
-    approved_bundle = decision_packet.get("approved_testcase_bundle", {})
-    testcases_for_prompt = json.dumps(approved_bundle, ensure_ascii=False, indent=2) if approved_bundle else "{}"
-
-    testplan_system = (
-        "You are an expert QA engineer. Based on the approved testcase bundle below, "
-        "produce a comprehensive test plan document in English markdown format.\n\n"
-        "The test plan MUST include:\n"
-        "1. **Overview** - purpose, scope, story ID\n"
-        "2. **Test Strategy** - approach, environments, tools\n"
-        "3. **Test Cases** - table with ID, Title, Priority, Category, Steps, Expected Result\n"
-        "4. **Acceptance Criteria Traceability** - mapping testcases to acceptance criteria\n"
-        "5. **Risks & Assumptions**\n"
-        "6. **Environment Checklist**\n\n"
-        "Use markdown formatting (headers, tables, lists). Be thorough and professional."
-    )
-    testplan_human = (
-        f"Story ID: {story_id}\n\n"
-        f"Approved Testcase Bundle:\n```json\n{testcases_for_prompt}\n```\n\n"
-        f"Work Order:\n{state.get('dev_docs', '')[:3000]}\n\n"
-        f"Audit/DoD:\n{state.get('audit_docs', '')[:2000]}\n\n"
-        "Generate the test plan document in markdown."
-    )
-
-    testplan_md_content = ""
-    testplan_gen_error = None
-    try:
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from langchain_openai import ChatOpenAI
-
-        ds_api_key = os.getenv("GLOBAL_DEEPSEEK_KEY", "")
-        ds_base_url = os.getenv("DEEPSEEK_BASE_URL", "") or "https://api.deepseek.com/v1"
-
-        ds_model = ChatOpenAI(
-            model="deepseek-reasoner",
-            temperature=0.0,
-            max_tokens=8000,
-            timeout=120,
-            api_key=ds_api_key or None,
-            base_url=ds_base_url,
-        )
-        ds_resp = ds_model.invoke([
-            SystemMessage(content=testplan_system),
-            HumanMessage(content=testplan_human),
-        ])
-        testplan_md_content = ds_resp.content if isinstance(ds_resp.content, str) else str(ds_resp.content)
-        if testplan_md_content.startswith("```"):
-            lines = testplan_md_content.split("\n")
-            if lines[0].strip().startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            testplan_md_content = "\n".join(lines)
-    except Exception as e:
-        testplan_gen_error = str(e)
-
-    testplan_file_saved = False
-    if testplan_md_content.strip():
-        try:
-            testplan_md_path.write_text(testplan_md_content, encoding="utf-8")
-            testplan_file_saved = True
-        except Exception as e:
-            testplan_gen_error = f"File write failed: {e}"
-
-    testplan_store_result = None
-    if testplan_md_content.strip():
-        testplan_store_result = sidecar.save_report(
-            run_id=run_id,
-            agent_id="testplan_routing_agent",
-            report_type="testplan_packet",
-            title=f"Test plan for {story_id} (DeepSeek-R1)",
-            path=str(testplan_md_path),
-            content_text=testplan_md_content,
-        )
-
-    return {
-        "provider": "deepseek-r1",
-        "model": "deepseek-reasoner",
-        "story_id": story_id,
-        "file_path": str(testplan_md_path),
-        "file_saved": testplan_file_saved,
-        "error": testplan_gen_error,
-        "content_length": len(testplan_md_content),
-        "sqlite_store": testplan_store_result,
-    }
-
-
 def _post_tester_testplan_followup(state: QAState, sidecar: QAHistorySidecar, dry_run: bool) -> dict[str, Any]:
     story_id = detect_current_story_id(state) or "sto000x"
     routing_packet = state.get("testplan_routing_packet") if isinstance(state.get("testplan_routing_packet"), dict) else {}
@@ -996,13 +879,52 @@ def _post_tester_testplan_followup(state: QAState, sidecar: QAHistorySidecar, dr
     rerun_result: dict[str, Any] | None = None
     terminal_reason_code = ""
     process_control_action_log: list[dict[str, Any]] = []
-    if not check_before.get("ready"):
-        if not dry_run:
-            rerun_result = generate_testplan_via_deepseek(
-                state=state,
-                sidecar=sidecar,
-                run_id=str(state.get("run_id", "")),
-            )
+    security_findings = detect_kilocode_security_violations(state)
+
+    pid_info = _read_kilocode_pidfile()
+    pid_running = False
+    pid_killed = False
+    if isinstance(pid_info, dict):
+        pid = int(pid_info.get("pid", 0) or 0)
+        if pid > 0:
+            pid_running = _pid_is_running(pid)
+            # If doc already ready but Kilo Code still alive, stop stale worker.
+            if pid_running and check_before.get("ready") and not dry_run:
+                pid_killed = _terminate_pid(pid)
+                action = "kill_stale_kilocode"
+                if pid_killed:
+                    _clear_kilocode_pidfile()
+                process_control_action_log.append(
+                    {
+                        "action": "kill_stale_kilocode",
+                        "performed": bool(pid_killed),
+                        "reason": "testplan_already_ready",
+                    }
+                )
+
+    if security_findings and not dry_run:
+        action = "force_terminate_due_to_security"
+        terminal_reason_code = "suspicious_behavior_detected"
+        if pid_running and isinstance(pid_info, dict):
+            pid = int(pid_info.get("pid", 0) or 0)
+            if pid > 0:
+                pid_killed = _terminate_pid(pid)
+                if pid_killed:
+                    _clear_kilocode_pidfile()
+        process_control_action_log.append(
+            {
+                "action": "force_terminate_process",
+                "performed": True,
+                "reason": terminal_reason_code,
+                "security_findings": security_findings,
+            }
+        )
+    elif not check_before.get("ready"):
+        if not dry_run and not pid_running:
+            persona = load_persona("testplan_generator_glm5")
+            assigned_docs = resolve_assigned_documents(persona, state)
+            model_cfg = load_yaml(QA_DIR / "configs" / "model_config.yaml")
+            rerun_result = call_kilocode_cli(persona, state, model_cfg, assigned_docs)
             rerun_attempted = True
             action = "rerun_testplan_generator"
             process_control_action_log.append(
@@ -1011,16 +933,24 @@ def _post_tester_testplan_followup(state: QAState, sidecar: QAHistorySidecar, dr
                     "performed": True,
                     "reason": "missing_or_incomplete_testplan",
                     "rerun_error": rerun_result.get("error") if isinstance(rerun_result, dict) else None,
-                    "provider": "deepseek-r1",
                 }
             )
-        else:
+        elif dry_run:
             action = "dry_run_no_action"
             process_control_action_log.append(
                 {
                     "action": "skip_runtime_remediation",
                     "performed": False,
                     "reason": "dry_run",
+                }
+            )
+        elif pid_running:
+            action = "wait_or_kill_running_kilocode"
+            process_control_action_log.append(
+                {
+                    "action": "defer_until_running_process_finishes",
+                    "performed": False,
+                    "reason": "kilocode_already_running",
                 }
             )
 
@@ -1069,8 +999,12 @@ def _post_tester_testplan_followup(state: QAState, sidecar: QAHistorySidecar, dr
         "quality_verdict_before": verdict_before,
         "check_after": check_after,
         "testplan_quality_verdict": verdict_after,
+        "kilocode_pid": pid_info,
+        "kilocode_running": pid_running,
+        "kilocode_killed": pid_killed,
         "rerun_attempted": rerun_attempted,
         "rerun_result": rerun_result,
+        "security_findings": security_findings,
         "process_control_action_log": process_control_action_log,
         "tester_gate_decision": tester_gate_decision,
         "action": action,
@@ -1080,12 +1014,9 @@ def _post_tester_testplan_followup(state: QAState, sidecar: QAHistorySidecar, dr
 def build_tester_execution_packet(state: QAState, sidecar: QAHistorySidecar, dry_run: bool) -> dict[str, Any]:
     run_id = str(state.get("run_id", ""))
     story_id = detect_current_story_id(state) or "sto000x"
-    script_routing_packet = state.get("script_routing_packet") if isinstance(state.get("script_routing_packet"), dict) else {}
-    script_pattern = str(script_routing_packet.get("target_script_pattern", "")).strip() or f"{story_id}_*.spec.ts"
-    script_dir_rel = str(script_routing_packet.get("target_script_directory", "")).strip() or "playwright/test"
-    playwright_root_rel = str(script_routing_packet.get("playwright_context_root", "")).strip() or "playwright"
-    script_dir = ROOT / script_dir_rel
-    playwright_root = ROOT / playwright_root_rel
+    script_pattern = f"{story_id}_*.spec.ts"
+    script_dir = ROOT / "scripts" / "qa"
+    playwright_root = ROOT / "test" / "playwright"
 
     latest_script = sidecar.get_latest_report_by_story(
         run_id=run_id,
@@ -1101,34 +1032,9 @@ def build_tester_execution_packet(state: QAState, sidecar: QAHistorySidecar, dry
 
     commands = _normalize_command_list(script_packet.get("playwright_execution_commands"))
     if not commands:
-        try:
-            script_subdir = script_dir.resolve().relative_to(playwright_root.resolve())
-            commands = [f"npx playwright test {script_subdir.as_posix()}/{script_pattern}"]
-        except ValueError:
-            commands = [f"npx playwright test {script_dir.resolve().as_posix()}/{script_pattern}"]
+        commands = [f"npx playwright test ../../scripts/qa/{script_pattern}"]
 
     script_files = sorted(str(p.relative_to(ROOT)) for p in script_dir.glob(script_pattern) if p.is_file())
-    final_test_insert_id: int | None = None
-    if sidecar.enabled and run_id:
-        pre_payload = {
-            "stage": "pre_execution",
-            "story_id": story_id,
-            "script_pattern": script_pattern,
-            "matched_scripts": script_files,
-            "commands": commands,
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        }
-        final_test_insert_id = sidecar.insert_final_test_pending(
-            run_id=run_id,
-            story_id=story_id,
-            script_report_id=latest_script.get("id") if latest_script else None,
-            script_report_path=str(latest_script.get("path")) if latest_script else None,
-            executed_from=playwright_root_rel,
-            script_glob=script_pattern,
-            commands=commands,
-            payload=pre_payload,
-        )
-
     execution_results: list[dict[str, Any]] = []
     error_logs: list[str] = []
 
@@ -1145,10 +1051,10 @@ def build_tester_execution_packet(state: QAState, sidecar: QAHistorySidecar, dry
         )
     elif not script_files:
         result_status = "failed"
-        error_logs.append(f"No script file matched pattern {script_pattern} under {script_dir_rel}.")
+        error_logs.append(f"No script file matched pattern {script_pattern} under scripts/qa.")
     elif not playwright_root.exists():
         result_status = "failed"
-        error_logs.append(f"Playwright context root {playwright_root_rel} does not exist.")
+        error_logs.append("Playwright context root test/playwright does not exist.")
     else:
         failures = 0
         for raw_cmd in commands:
@@ -1209,10 +1115,10 @@ def build_tester_execution_packet(state: QAState, sidecar: QAHistorySidecar, dry
             "report_created_at": latest_script.get("created_at") if latest_script else None,
         },
         "script_execution": {
-            "script_directory": script_dir_rel,
+            "script_directory": "scripts/qa",
             "script_pattern": script_pattern,
             "matched_scripts": script_files,
-            "playwright_context_root": playwright_root_rel,
+            "playwright_context_root": "test/playwright",
             "commands": commands,
             "results": execution_results,
         },
@@ -1234,66 +1140,23 @@ def build_tester_execution_packet(state: QAState, sidecar: QAHistorySidecar, dry
     }
 
     if sidecar.enabled and run_id:
-        updated = False
-        if final_test_insert_id is not None:
-            updated = sidecar.update_final_test_result(
-                final_test_id=final_test_insert_id,
-                result_status=result_status,
-                pass_count=pass_count,
-                fail_count=fail_count,
-                error_log=error_text,
-                result_payload=packet,
-            )
-        packet["sqlite_final_test_store"] = {
-            "inserted": final_test_insert_id is not None,
-            "row_id": final_test_insert_id,
-            "updated": bool(updated),
-        }
-    else:
-        packet["sqlite_final_test_store"] = {"inserted": False, "reason": "sidecar_disabled_or_missing_run_id"}
-
-    qa_report_path = resolve_qa_report_path(state, story_id)
-    qa_report_path.parent.mkdir(parents=True, exist_ok=True)
-    qa_report_markdown = build_qa_report_markdown_ko(
-        state=state,
-        story_id=story_id,
-        script_pattern=script_pattern,
-        script_files=script_files,
-        commands=commands,
-        execution_results=execution_results,
-        result_status=result_status,
-        pass_count=pass_count,
-        fail_count=fail_count,
-        error_text=error_text,
-        testplan_followup=testplan_followup if isinstance(testplan_followup, dict) else {},
-        tester_gate_decision=tester_gate_decision,
-    )
-    qa_report_saved = False
-    qa_report_error = ""
-    try:
-        qa_report_path.write_text(qa_report_markdown, encoding="utf-8")
-        qa_report_saved = True
-    except Exception as e:
-        qa_report_error = str(e)
-
-    qa_report_store_row_id: int | None = None
-    if qa_report_saved and sidecar.enabled and run_id:
-        qa_report_store_row_id = sidecar.save_report(
+        row_id = sidecar.save_final_test_record(
             run_id=run_id,
-            agent_id="tester_routing_agent",
-            report_type="qa_report",
-            title=f"QA final report for {story_id}",
-            path=str(qa_report_path),
-            content_text=qa_report_markdown,
+            story_id=story_id,
+            script_report_id=latest_script.get("id") if latest_script else None,
+            script_report_path=str(latest_script.get("path")) if latest_script else None,
+            executed_from="test/playwright",
+            script_glob=script_pattern,
+            commands=commands,
+            result_status=result_status,
+            pass_count=pass_count,
+            fail_count=fail_count,
+            error_log=error_text,
+            result_payload=packet,
         )
-    packet["qa_report"] = {
-        "path": str(qa_report_path),
-        "saved": qa_report_saved,
-        "error": qa_report_error,
-        "sqlite_store_row_id": qa_report_store_row_id,
-        "template_path": str(QA_DIR / "templates" / "qa_report_template_ko.md"),
-        "prompt_path": str(QA_DIR / "prompts" / "system" / "qa_report_writer_ko.txt"),
-    }
+        packet["sqlite_final_test_store"] = {"saved": row_id is not None, "row_id": row_id}
+    else:
+        packet["sqlite_final_test_store"] = {"saved": False, "reason": "sidecar_disabled_or_missing_run_id"}
 
     return packet
 
@@ -1444,6 +1307,12 @@ def should_use_codex_cli(persona: dict[str, Any], model_cfg: dict[str, Any]) -> 
     return any(token in hint for token in hints)
 
 
+def should_use_kilocode_cli(persona: dict[str, Any], model_cfg: dict[str, Any]) -> bool:
+    hint = str(persona.get("model_hint", "")).lower()
+    hints = model_cfg.get("routing", {}).get("use_kilocode_cli_for_model_hints", ["glm-5", "glm5"])
+    return any(token in hint for token in hints)
+
+
 def call_vibe_cli(
     persona: dict[str, Any],
     state: QAState,
@@ -1515,59 +1384,17 @@ def call_vibe_cli(
             cmd.extend(["--enabled-tools", str(tool_name)])
 
     env = os.environ.copy()
-    real_home = str(Path.home())  # capture before HOME override
+    env["VIBE_LOG_DIR"] = "/tmp"
     env["HOME"] = "/tmp"
-
-    import shutil
-    try:
-        os.makedirs("/tmp/.vibe/logs/session", exist_ok=True)
-        config_src = Path(real_home) / ".vibe" / "config.toml"
-        if config_src.exists():
-            with open(str(config_src), "r") as f:
-                cfg_str = f.read()
-            # override auto_approve to true to prevent hanging
-            cfg_str = cfg_str.replace("auto_approve = false", "auto_approve = true")
-            import re
-            cfg_str = re.sub(r'save_dir\s*=\s*".*"', 'save_dir = "/tmp/.vibe/logs/session"', cfg_str)
-            with open("/tmp/.vibe/config.toml", "w") as f:
-                f.write(cfg_str)
-    except Exception:
-        pass
-    # Load MISTRAL_API_KEY from ~/.vibe/.env if not already present
-    if "MISTRAL_API_KEY" not in env:
-        vibe_env_file = Path(real_home) / ".vibe" / ".env"
-        if vibe_env_file.exists():
-            try:
-                for line in vibe_env_file.read_text().strip().splitlines():
-                    line = line.strip()
-                    if line.startswith("MISTRAL_API_KEY"):
-                        _, _, val = line.partition("=")
-                        env["MISTRAL_API_KEY"] = val.strip().strip("'\"")
-                        break
-            except Exception:
-                pass
-
-    try:
-        with open("/tmp/last_vibe_prompt.txt", "w") as pf:
-            pf.write(full_prompt)
-        proc = subprocess.run(
-            cmd,
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
-            env=env,
-            timeout=60,
-        )
-    except Exception as e:
-        return {
-            "provider": "vibe_cli",
-            "error": "vibe_cli_failed",
-            "returncode": -1,
-            "stderr": str(e),
-            "stdout": "",
-            "cmd": cmd,
-        }
+    
+    proc = subprocess.run(
+        cmd,
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
     if proc.returncode != 0:
         return {
             "provider": "vibe_cli",
@@ -1627,12 +1454,12 @@ def call_codex_cli(
     persona_id = str(persona.get("id", "")).strip()
     story_only_mode = persona_id == "test_scripter_codex"
     script_routing_packet = state.get("script_routing_packet") if isinstance(state.get("script_routing_packet"), dict) else {}
-    target_script_dir = str(script_routing_packet.get("target_script_directory", "")).strip() or "playwright/test"
+    target_script_dir = str(script_routing_packet.get("target_script_directory", "")).strip() or "scripts/qa"
     target_script_pattern = str(script_routing_packet.get("target_script_pattern", "")).strip() or "sto00X_*.spec.ts"
-    playwright_root = str(script_routing_packet.get("playwright_context_root", "")).strip() or "playwright"
+    playwright_root = str(script_routing_packet.get("playwright_context_root", "")).strip() or "test/playwright"
     access_policy = (
-        f"파일 접근 정책: {target_script_dir} 디렉토리 내부에서만 테스트 스크립트를 생성/수정하라. "
-        f"{target_script_dir} 외 경로에는 파일 생성/수정을 시도하지 마라. "
+        "파일 접근 정책: scripts/qa 디렉토리 내부에서만 테스트 스크립트를 생성/수정하라. "
+        "scripts/qa 외 경로에는 파일 생성/수정을 시도하지 마라. "
         f"스토리 온리 규칙을 준수해 파일명은 반드시 {target_script_pattern} 패턴을 따라라. "
         f"실행 컨텍스트는 {playwright_root} 기준으로 Playwright를 사용하라."
         if story_only_mode
@@ -1661,9 +1488,7 @@ def call_codex_cli(
         sandbox_mode,
     ]
 
-    # Check persona-level schema override first, then fall back to codex_cli config
-    invocation = persona.get("invocation", {})
-    schema_path = invocation.get("output_schema_file") or codex_cfg.get("output_schema_file")
+    schema_path = codex_cfg.get("output_schema_file")
     if isinstance(schema_path, str) and schema_path.strip():
         resolved_schema = (ROOT / schema_path).resolve() if not schema_path.startswith("/") else Path(schema_path)
         cmd.extend(["--output-schema", str(resolved_schema)])
@@ -1676,23 +1501,8 @@ def call_codex_cli(
     cmd.extend(["--", "-"])
 
     env = os.environ.copy()
-    real_home = str(Path.home())  # capture before HOME override
-    env["CODEX_LOG_DIR"] = "/tmp"
     env["HOME"] = "/tmp"
-    env["XDG_CACHE_HOME"] = "/tmp/.cache"
-    env["XDG_CONFIG_HOME"] = "/tmp/.config"
-    env["XDG_DATA_HOME"] = "/tmp/.local/share"
-    
-    import shutil
-    try:
-        os.makedirs("/tmp/.codex", exist_ok=True)
-        for cfg_file in ["config.toml", "auth.json"]:
-            src = Path(real_home) / ".codex" / cfg_file
-            if src.exists():
-                shutil.copy2(str(src), f"/tmp/.codex/{cfg_file}")
-    except Exception:
-        pass
-
+    env["CODEX_LOG_DIR"] = "/tmp"
     endpoint_cfg = codex_cfg.get("endpoint", {})
     if isinstance(endpoint_cfg, dict):
         base_url = str(endpoint_cfg.get("base_url", "")).strip()
@@ -1745,6 +1555,209 @@ def call_codex_cli(
     }
 
 
+def call_kilocode_cli(
+    persona: dict[str, Any],
+    state: QAState,
+    model_cfg: dict[str, Any],
+    assigned_docs: dict[str, Any],
+) -> dict[str, Any]:
+    prompt_template = read_text(QA_DIR / "prompts" / "system" / "agentic_template.txt")
+    mission_lines = persona.get("mission", [])
+    mission = "\n".join(f"- {m}" for m in mission_lines)
+    docs = "\n".join(f"- {d}" for d in persona.get("documentation_to_produce", []))
+
+    system_prompt = prompt_template.format(
+        persona_name=persona.get("name", persona.get("id", "unknown")),
+        persona_role=persona.get("role", ""),
+        persona_mission=mission,
+        documentation_to_produce=docs,
+    )
+
+    human_payload = {
+        "workflow": state.get("workflow_id"),
+        "run_id": state.get("run_id"),
+        "assigned_documents": assigned_docs.get("documents", {}),
+        "missing_docs": {
+            "required": assigned_docs.get("missing_required", []),
+            "optional": assigned_docs.get("missing_optional", []),
+        },
+        "policy": {
+            "proceed_on_missing_docs": bool(assigned_docs.get("proceed_on_missing", True)),
+        },
+        "inputs": {
+            "dev_docs": state.get("dev_docs", ""),
+            "audit_docs": state.get("audit_docs", ""),
+            "changed_files": state.get("changed_files", []),
+        },
+        "intermediate": {
+            "architecture_packet": state.get("architecture_packet"),
+            "adversarial_packet": state.get("adversarial_packet"),
+            "clerk_packet": state.get("clerk_packet"),
+            "decision_packet": state.get("decision_packet"),
+            "testplan_routing_packet": state.get("testplan_routing_packet"),
+            "script_routing_packet": state.get("script_routing_packet"),
+            "testplan_packet": state.get("testplan_packet"),
+            "script_packet": state.get("script_packet"),
+        },
+    }
+
+    persona_id = str(persona.get("id", "")).strip()
+    docs_only_mode = persona_id == "testplan_generator_glm5"
+    routing_packet = state.get("testplan_routing_packet") if isinstance(state.get("testplan_routing_packet"), dict) else {}
+    target_plan_path = str(routing_packet.get("target_testplan_path", "")).strip()
+    if not target_plan_path and docs_only_mode:
+        story_token = detect_current_story_id(state) or "sto000x"
+        target_plan_path = f"docs/testplans/{story_token}_testplan.md"
+    access_policy = (
+        "파일 접근 정책: docs/testplans 디렉토리 내부만 조회/수정 가능. "
+        "docs/testplans 외 경로는 조회/수정/생성/삭제를 시도하지 마라. "
+        f"산출물은 반드시 {target_plan_path} 경로에 markdown으로 생성/갱신하라."
+        if docs_only_mode
+        else "파일 접근 정책: 현재 리포지토리 범위 내에서만 작업."
+    )
+    full_prompt = (
+        "에이전트로서 다음 태스크를 수행하라. 계획->실행->검증 순서로 답하라.\n"
+        + access_policy
+        + "\n\n"
+        + f"{system_prompt}\n\nReturn JSON only.\n\n"
+        + json.dumps(human_payload, ensure_ascii=True, indent=2)
+    )
+
+    kilo_cfg = model_cfg.get("kilocode_cli", {})
+    model_name = resolve_model_name(persona, model_cfg, str(kilo_cfg.get("model", "glm-5-free")))
+    cmd = [str(kilo_cfg.get("command", "kilocode"))]
+    subcommand = str(kilo_cfg.get("subcommand", "run")).strip()
+    if subcommand:
+        cmd.append(subcommand)
+    if bool(kilo_cfg.get("auto", True)):
+        cmd.append("--auto")
+    fmt = str(kilo_cfg.get("format", "json")).strip()
+    if fmt:
+        cmd.extend(["--format", fmt])
+    provider_env = str(kilo_cfg.get("provider_env", "KILO_PROVIDER")).strip()
+    provider_value = str(kilo_cfg.get("provider_value", "kilo")).strip()
+    model_env = str(kilo_cfg.get("model_env", "KILOCODE_MODEL")).strip()
+    cli_model = model_name
+    if "/" not in cli_model and provider_value:
+        cli_model = f"{provider_value}/{cli_model}"
+    cmd.extend(["--model", cli_model])
+
+    timeout = kilo_cfg.get("timeout")
+    timeout_flag = str(kilo_cfg.get("timeout_flag", "")).strip()
+    if timeout is not None and timeout_flag:
+        cmd.extend([timeout_flag, str(timeout)])
+
+    run_cwd = str((ROOT / "docs" / "testplans").resolve()) if docs_only_mode else str(ROOT)
+
+    import tempfile
+    
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, dir=run_cwd) as tf:
+        tf.write(full_prompt)
+        prompt_file = tf.name
+
+    extra_args = kilo_cfg.get("extra_args", [])
+    if isinstance(extra_args, list):
+        for arg in extra_args:
+            cmd.append(str(arg))
+
+    cmd.extend(["--file", prompt_file, "Please execute the instructions in the attached file."])
+
+    env = os.environ.copy()
+    if provider_env and provider_value:
+        env[provider_env] = provider_value
+    if model_env:
+        env[model_env] = cli_model
+    if docs_only_mode:
+        docs_root = str((ROOT / "docs" / "testplans").resolve())
+        env["KILOCODE_SANDBOX_PATH"] = docs_root
+        env["KILOCODE_TOOL_WHITELIST"] = "read,write"
+
+    try:
+        popen = subprocess.Popen(
+            cmd,
+            cwd=run_cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        if docs_only_mode:
+            _write_kilocode_pidfile(popen.pid, run_cwd, detect_current_story_id(state))
+        stdout_raw, stderr_raw = popen.communicate()
+        proc_returncode = int(popen.returncode or 0)
+        try:
+            os.remove(prompt_file)
+        except Exception:
+            pass
+    except FileNotFoundError:
+        return {
+            "provider": "kilocode_cli",
+            "error": "kilocode_not_found",
+            "stderr": "kilocode command not found in PATH.",
+            "cmd": cmd,
+            "cwd": run_cwd,
+        }
+    finally:
+        if docs_only_mode:
+            _clear_kilocode_pidfile()
+
+    if proc_returncode != 0:
+        return {
+            "provider": "kilocode_cli",
+            "error": "kilocode_cli_failed",
+            "returncode": proc_returncode,
+            "stderr": (stderr_raw or "").strip(),
+            "stdout": (stdout_raw or "").strip(),
+            "cmd": cmd,
+            "cwd": run_cwd,
+        }
+
+    stdout = (stdout_raw or "").strip()
+    parsed = safe_json(stdout)
+    if isinstance(parsed, dict) and not parsed.get("parse_error"):
+        parsed["provider"] = "kilocode_cli"
+        return parsed
+
+    events: list[dict[str, Any]] = []
+    assistant_parts: list[str] = []
+    for line in stdout.splitlines():
+        row = line.strip()
+        if not row:
+            continue
+        event = safe_json(row)
+        if isinstance(event, dict) and not event.get("parse_error"):
+            events.append(event)
+            role = str(event.get("role", "")).lower()
+            content = event.get("content")
+            if role == "assistant" and isinstance(content, str):
+                assistant_parts.append(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        assistant_parts.append(part["text"])
+                    elif isinstance(part, str):
+                        assistant_parts.append(part)
+        elif row.startswith("{") and row.endswith("}"):
+            assistant_parts.append(row)
+
+    assistant_text = "\n".join(x for x in assistant_parts if x).strip()
+    if events:
+        return {
+            "provider": "kilocode_cli",
+            "assistant_text": assistant_text or stdout,
+            "events": events,
+            "raw_stdout": stdout,
+            "cwd": run_cwd,
+        }
+
+    return {
+        "provider": "kilocode_cli",
+        "assistant_text": stdout,
+        "raw_payload": parsed,
+        "cwd": run_cwd,
+    }
+
+
 def node_fn(persona_id: str, packet_key: str, sidecar: QAHistorySidecar):
     def _run(state: QAState) -> QAState:
         run_id = str(state.get("run_id", ""))
@@ -1756,7 +1769,7 @@ def node_fn(persona_id: str, packet_key: str, sidecar: QAHistorySidecar):
                 input_payload={"changed_files": state.get("changed_files", [])},
             )
 
-        if persona_id == "test_scripter_codex":
+        if persona_id in ("testplan_generator_glm5", "test_scripter_codex"):
             decision = state.get("decision_packet") or {}
             guardrail = decision.get("guardrail_filter_result") if isinstance(decision, dict) else {}
             if isinstance(guardrail, dict) and guardrail.get("status") == "BLOCK":
@@ -1807,14 +1820,12 @@ def node_fn(persona_id: str, packet_key: str, sidecar: QAHistorySidecar):
                 script_packet["generated_at_utc"] = generated_at_utc
                 script_packet["doc_assignment"] = shared_doc_assignment
 
-                testplan_generation = generate_testplan_via_deepseek(state=state, sidecar=sidecar, run_id=run_id)
-
                 packet = {
                     "provider": "routing_agent",
                     "status": "dispatch_ready",
-                    "summary": "Generated testplan via DeepSeek-R1 inline, dispatching test_scripter_codex.",
-                    "dispatch_order": ["test_scripter_codex"],
-                    "testplan_generation": testplan_generation,
+                    "summary": "Assigned testplan generator first, then assigned test scripter without waiting for testplan completion.",
+                    "dispatch_order": ["testplan_generator_glm5", "test_scripter_codex"],
+                    "wait_for_testplan_completion": False,
                     "testplan_routing_packet": testplan_packet,
                     "script_routing_packet": script_packet,
                     "generated_at_utc": generated_at_utc,
@@ -1850,15 +1861,26 @@ def node_fn(persona_id: str, packet_key: str, sidecar: QAHistorySidecar):
             else:
                 model_cfg = load_yaml(QA_DIR / "configs" / "model_config.yaml")
                 if "routing_agent" in persona.get("model_hint", "").lower():
-                    packet = {
-                        "provider": "routing_agent",
-                        "status": "pending_manual_intervention",
-                        "assistant_text": f"Routing Agent ({persona.get('name', persona_id)}) needs to handle this step based on intermediate packets.",
-                    }
+                    security_findings = detect_kilocode_security_violations(state)
+                    if security_findings:
+                        packet = {
+                            "provider": "routing_agent",
+                            "status": "blocked_by_security_rule",
+                            "summary": "Blocked due to suspicious Kilo Code behavior (privilege/sandbox policy).",
+                            "security_findings": security_findings,
+                        }
+                    else:
+                        packet = {
+                            "provider": "routing_agent",
+                            "status": "pending_manual_intervention",
+                            "assistant_text": f"Routing Agent ({persona.get('name', persona_id)}) needs to handle this step based on intermediate packets.",
+                        }
                 elif should_use_codex_cli(persona, model_cfg):
                     packet = call_codex_cli(persona, state, model_cfg, assigned_docs)
                 elif should_use_vibe_cli(persona, model_cfg):
                     packet = call_vibe_cli(persona, state, model_cfg, assigned_docs)
+                elif should_use_kilocode_cli(persona, model_cfg):
+                    packet = call_kilocode_cli(persona, state, model_cfg, assigned_docs)
                 else:
                     api_key_env, _, api_key, _ = resolve_endpoint_config(model_cfg)
                     if not api_key:
@@ -1913,59 +1935,6 @@ def node_fn(persona_id: str, packet_key: str, sidecar: QAHistorySidecar):
                     packet_key: packet,
                     "tester_gate_decision": packet.get("tester_gate_decision", {}),
                 }
-
-            # --- Post-processing: extract test scripts written by Codex (sandbox can't write files) ---
-            if persona_id == "test_scripter_codex":
-                saved_scripts: list[dict[str, Any]] = []
-                # Source 1: structured executable_test_scripts field
-                scripts = packet.get("executable_test_scripts", [])
-                # Source 2: fallback – Codex sometimes puts everything in summary JSON
-                if not scripts:
-                    raw_summary = packet.get("summary", "")
-                    if isinstance(raw_summary, str) and raw_summary.strip().startswith("{"):
-                        try:
-                            parsed_summary = json.loads(raw_summary)
-                            scripts = parsed_summary.get("playwright_test_scripts", [])
-                            # Also backfill structured fields from summary
-                            if not packet.get("test_script_spec") and parsed_summary.get("test_script_spec"):
-                                packet["test_script_spec"] = parsed_summary["test_script_spec"]
-                            if not packet.get("test_env_checklist") and parsed_summary.get("test_env_checklist"):
-                                packet["test_env_checklist"] = parsed_summary["test_env_checklist"]
-                            if not packet.get("assumptions") and parsed_summary.get("assumptions"):
-                                packet["assumptions"] = parsed_summary["assumptions"]
-                            if not packet.get("risks") and parsed_summary.get("risks"):
-                                packet["risks"] = parsed_summary["risks"]
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
-                for script_item in scripts:
-                    if not isinstance(script_item, dict):
-                        continue
-                    rel_path = script_item.get("path", "").strip()
-                    content = script_item.get("content", "").strip()
-                    if not rel_path or not content:
-                        continue
-                    abs_path = ROOT / rel_path
-                    try:
-                        abs_path.parent.mkdir(parents=True, exist_ok=True)
-                        abs_path.write_text(content, encoding="utf-8")
-                        saved_scripts.append({
-                            "path": str(abs_path),
-                            "relative": rel_path,
-                            "language": script_item.get("language", "unknown"),
-                            "size": len(content),
-                        })
-                        print(f"  → Script saved: {abs_path}")
-                    except Exception as write_err:
-                        saved_scripts.append({
-                            "path": rel_path,
-                            "error": str(write_err),
-                        })
-
-                if saved_scripts:
-                    packet["extracted_scripts"] = saved_scripts
-                    print(f"  Extracted {len(saved_scripts)} test script(s) from Codex response")
-
             return {packet_key: packet}
         except Exception as e:
             if run_id:
@@ -2001,11 +1970,17 @@ def build_graph(_: dict[str, Any], sidecar: QAHistorySidecar):
     graph.add_node("clerk_routing_agent", node_fn("clerk_routing_agent", "clerk_packet", sidecar))
     graph.add_node("decision_maker_gpt5x", node_fn("decision_maker_gpt5x", "decision_packet", sidecar))
     graph.add_node("testplan_routing_agent", node_fn("testplan_routing_agent", "testplan_routing_packet", sidecar))
+    graph.add_node("testplan_generator_glm5", node_fn("testplan_generator_glm5", "testplan_packet", sidecar))
     graph.add_node("test_scripter_codex", node_fn("test_scripter_codex", "script_packet", sidecar))
     graph.add_node("tester_routing_agent", node_fn("tester_routing_agent", "execution_packet", sidecar))
 
-    graph.set_entry_point("testplan_routing_agent")
+    graph.set_entry_point("test_architect_mistral")
 
+    graph.add_edge("test_architect_mistral", "test_architect2_deepseek_r1")
+    graph.add_edge("test_architect2_deepseek_r1", "clerk_routing_agent")
+    graph.add_edge("clerk_routing_agent", "decision_maker_gpt5x")
+    graph.add_edge("decision_maker_gpt5x", "testplan_routing_agent")
+    graph.add_edge("testplan_routing_agent", "testplan_generator_glm5")
     graph.add_edge("testplan_routing_agent", "test_scripter_codex")
     graph.add_edge("test_scripter_codex", "tester_routing_agent")
     graph.add_edge("tester_routing_agent", END)
@@ -2016,8 +1991,13 @@ def build_graph(_: dict[str, Any], sidecar: QAHistorySidecar):
 def run_fallback_graph(initial_state: QAState, sidecar: QAHistorySidecar) -> QAState:
     state: QAState = dict(initial_state)
     order = [
+        ("test_architect_mistral", "architecture_packet"),
+        ("test_architect2_deepseek_r1", "adversarial_packet"),
+        ("clerk_routing_agent", "clerk_packet"),
+        ("decision_maker_gpt5x", "decision_packet"),
         ("testplan_routing_agent", "testplan_routing_packet"),
         ("test_scripter_codex", "script_packet"),
+        ("testplan_generator_glm5", "testplan_packet"),
         ("tester_routing_agent", "execution_packet"),
     ]
     for persona_id, packet_key in order:
@@ -2042,17 +2022,6 @@ def main() -> None:
         "audit_docs_path": str(args.audit_docs),
         "changed_files": args.changed_files,
     }
-
-    # Load decision_packet from SQLite (cross-run fallback)
-    dp_report = sidecar.get_latest_report_any_run(report_type="decision_packet")
-    if dp_report and isinstance(dp_report.get("content_text"), str):
-        try:
-            dp_parsed = json.loads(dp_report["content_text"])
-            if isinstance(dp_parsed, dict) and not dp_parsed.get("parse_error"):
-                initial_state["decision_packet"] = dp_parsed
-                print(f"Loaded decision_packet from SQLite row {dp_report['id']} (run {dp_report['run_id']})")
-        except Exception:
-            pass
 
     run_id = str(initial_state["run_id"])
     sidecar.start_run(

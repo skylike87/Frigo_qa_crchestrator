@@ -15,9 +15,9 @@ testing_rules:
     - validate_testplan_generator_quality
     - decide_rerun_or_force_terminate_if_needed
   script_authoring_mode: story_only
-  script_output_root: playwright/test
+  script_output_root: scripts/qa
   script_filename_pattern: sto00X_*.spec.ts
-  playwright_context_root: playwright
+  playwright_context_root: test/playwright
   required_execution_pattern:
     - npx playwright test
   artifact_expectations:
@@ -27,7 +27,7 @@ testing_rules:
     - testplan_quality_verdict
 testplan_quality_gate:
   owner_node: tester_routing_agent
-  source_node: testplan_routing_agent
+  source_node: testplan_generator_glm5
   required_checks:
     - target_testplan_file_exists_for_current_story
     - mandatory_sections_present
@@ -40,17 +40,19 @@ testplan_quality_gate:
       - rerun_failed
       - output_missing_after_rerun
       - output_stale_or_incomplete
+      - suspicious_behavior_detected
 testplan_routing_rules:
   owner_node: testplan_routing_agent
   reads_from: qa_reports
-  primary_target_node: testplan_routing_agent_inline_deepseek
+  primary_target_node: testplan_generator_glm5
   secondary_target_node: test_scripter_codex
   dispatch_order:
+    - testplan_generator_glm5
     - test_scripter_codex
   wait_for_testplan_completion: false
   target_directory: docs/testplans
   required_filename_pattern: sto00X_testplan.md
-  script_target_directory: playwright/test
+  script_target_directory: scripts/qa
   script_required_filename_pattern: sto00X_*.spec.ts
   script_authoring_mode: story_only
   required_report_types:
@@ -104,10 +106,11 @@ db_handoff_rules:
     owner_node: tester_routing_agent
     checks:
       - docs_testplans_output_exists_for_current_story
-      - deepseek_generation_completed
+      - kilocode_completion_state
       - testplan_quality_gate_passed
     remediation_actions:
-      - rerun_deepseek_testplan_generation_if_missing_or_incomplete
+      - rerun_testplan_generator_if_missing_or_incomplete
+      - terminate_stale_kilocode_if_needed
       - force_terminate_workflow_if_nonrecoverable
   merge_contract:
     - architecture_packet_from_sqlite_or_fallback
@@ -140,7 +143,7 @@ decision_handoff_contract:
     - assumption_and_gap_register
     - pii_masking_rules
     - guardrail_filter_result
-  handoff_to_testplan_generation:
+  handoff_to_testplan_generator_glm5:
     - testplan_input_packet
     - ui_component_scope_matrix
     - scenario_priority_plan
@@ -154,22 +157,34 @@ decision_handoff_contract:
     - non_goals_for_scripter
   dispatch_policy:
     order:
+      - testplan_generator_glm5
       - test_scripter_codex
     wait_for_testplan_completion: false
   forbidden_for_decision_maker:
     - playwright_test_scripts
     - executable_test_scripts
     - code_patch_output
-entrypoint: testplan_routing_agent
+entrypoint: test_architect_mistral
 nodes:
   - test_architect_mistral
   - test_architect2_deepseek_r1
   - clerk_routing_agent
   - decision_maker_gpt5x
   - testplan_routing_agent
+  - testplan_generator_glm5
   - test_scripter_codex
   - tester_routing_agent
 edges:
+  - from: test_architect_mistral
+    to: test_architect2_deepseek_r1
+  - from: test_architect2_deepseek_r1
+    to: clerk_routing_agent
+  - from: clerk_routing_agent
+    to: decision_maker_gpt5x
+  - from: decision_maker_gpt5x
+    to: testplan_routing_agent
+  - from: testplan_routing_agent
+    to: testplan_generator_glm5
   - from: testplan_routing_agent
     to: test_scripter_codex
   - from: test_scripter_codex

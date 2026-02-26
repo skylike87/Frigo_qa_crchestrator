@@ -8,7 +8,7 @@ This directory defines a LangChain/LangGraph QA orchestration for the flow you d
 - `test_architect2_deepseek_r1`: Adversarial/edge-case inference.
 - `clerk_gemini_fast`: Consolidated core spec packet (scenario, AOM mapping, risk/security matrix).
 - `decision_maker_gpt5x`: Final testcase approval + PII/security guardrail filtering.
-- `testplan_generator_glm5`: Legacy persona (replaced by inline DeepSeek-R1 generation in routing node).
+- `testplan_generator_glm5`: User-facing UI/component test plan writing.
 - `test_scripter_codex`: Executable script/spec generation.
 - `tester_routing_agent`: Final QA gate owner (script execution, final report, testplan quality follow-up control).
 
@@ -17,42 +17,15 @@ This directory defines a LangChain/LangGraph QA orchestration for the flow you d
 - Workflow file: `.qa/workflows/agentic_qa_flow.yaml`
 - Runtime graph: `.qa/scripts/graph.py`
 
-## Submodule/Porting
-
-- This repository is intended to run as `<host-workspace>/.qa`.
-- Use one of:
-  - Git submodule (recommended)
-  - Symlink
-  - Copy
-- Full guide: `MIGRATION_SUBMODULE.md`
-- After mounting at `.qa`, run one-time host bootstrap:
-
-```bash
-bash .qa/scripts/bootstrap_host_workspace.sh
-```
-
-Bootstrap includes:
-- `.qa` placement validation
-- `playwright` directory and `playwright/test` directory creation
-- container runtime validation (`docker compose`) and container profile setup
-
-Host-local Playwright install is optional:
-
-```bash
-bash .qa/scripts/bootstrap_host_workspace.sh --with-playwright-install
-```
-
-Run QA commands in container:
-
-```bash
-bash .qa/scripts/run_in_qa_container.sh "flutter --version && node --version && npx playwright --version"
-```
-
 Main path:
 
-1. Testplan Routing Agent (DeepSeek-R1 inline generation)
-2. Test Scripter (Codex)
-3. Tester (Routing Agent)
+1. Test Architect (Mistral)
+2. Test Architect2 (DeepSeek-R1)
+3. Clerk (Gemini Fast)
+4. Decision Maker (GPT-5x)
+5. Testplan Generator (GLM-5)
+6. Test Scripter (Codex)
+7. Tester (Routing Agent)
 
 ## Test Automation Rule
 
@@ -75,12 +48,20 @@ Main path:
   - Missing assigned docs are recorded in `doc_assignment.missing_required/missing_optional`
   - Execution continues (no hard stop), so you can improve docs incrementally.
 
-## Testplan Generation via DeepSeek-R1 API
+## GLM-5 via Kilo Code CLI
 
-- `testplan_routing_agent` calls DeepSeek-R1 (`deepseek-reasoner`) directly in `graph.py`.
-- Generated output is normalized to markdown and saved to `docs/testplans/<story_id>_testplan.md`.
-- The same markdown content is persisted to SQLite (`qa_reports`, `report_type=testplan_packet`).
-- Tester follow-up reruns use the same DeepSeek-R1 path when the target testplan is missing or incomplete.
+- `testplan_generator_glm5` is routed to Kilo Code CLI in graph runtime.
+- Routing trigger: persona `model_hint` contains `glm-5`/`glm5`.
+- Execution mode:
+  - `kilocode run --auto --format json --model kilo/z-ai/glm-5:free "<prompt>"`
+  - `KILOCODE_MODEL`/`KILO_PROVIDER` are set from config.
+- Scope restriction:
+  - `testplan_generator_glm5` runs with working directory fixed to `docs/testplans/`.
+  - Prompt policy blocks read/write outside `docs/testplans/`.
+- Routing safety rule:
+  - Routing agents scan Kilo Code outputs for suspicious behavior (e.g. `sudo`, sandbox escape/destructive command patterns).
+  - If detected, packet status is set to `blocked_by_security_rule`.
+- Config entry: `.qa/configs/model_config.yaml -> kilocode_cli`
 
 ## PII Guardrail (Decision Node)
 
@@ -91,7 +72,7 @@ Main path:
   - Scan `approved_testcase_bundle` for PII patterns (email/phone/SSN/card/API key).
   - Auto-mask detected values.
   - Set `guardrail_filter_result.status` to `BLOCK` when shape/PII violations exist.
-  - If `BLOCK`, downstream testplan generation and `test_scripter_codex` are skipped.
+  - If `BLOCK`, downstream `testplan_generator_glm5` and `test_scripter_codex` are skipped.
 
 ## Devstral2 One-shot Entrypoint (Vibe CLI)
 

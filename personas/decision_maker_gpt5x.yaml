@@ -3,8 +3,6 @@ name: Decision Maker (GPT-5x)
 model_hint: gpt-5
 model: gpt-5
 role: Final gatekeeper for test-case approval and compliance.
-invocation:
-  output_schema_file: .qa/configs/decision_packet_schema.json
 execution_policy:
   mode: read_only
   allow_code_generation: false

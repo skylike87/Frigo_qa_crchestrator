@@ -58,7 +58,7 @@ kilocode_cli:
   timeout_flag: ""
   timeout: 600
   provider_env: KILO_PROVIDER
-  provider_value: ""
+  provider_value: kilo
   model_env: KILOCODE_MODEL
   extra_args: []
 

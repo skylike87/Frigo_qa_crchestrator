@@ -8,7 +8,7 @@ mission:
   - Assign scripting work to test_scripter_codex immediately after assignment to testplan_generator_glm5
   - Do not wait for testplan_generator_glm5 completion before assigning test_scripter_codex
   - Build routing packets from SQLite lookups with provenance metadata
-  - For test_scripter_codex, enforce story-only script authoring contract (playwright/test + sto00X_*.spec.ts)
+  - For test_scripter_codex, enforce story-only script authoring contract (scripts/qa + sto00X_*.spec.ts)
   - Pass only validated, structured payload to downstream generator/scripter nodes
 documentation_to_produce:
   - sqlite_lookup_trace

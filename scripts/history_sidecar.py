@@ -10,7 +10,7 @@ from typing import Any
 
 
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value if value is not None else {}, ensure_ascii=False, indent=2)
+    return json.dumps(value if value is not None else {}, ensure_ascii=False)
 
 
 @dataclass
@@ -182,14 +182,6 @@ class QAHistorySidecar:
     ) -> int | None:
         if not self.enabled:
             return None
-
-        try:
-            parsed = json.loads(content_text)
-            if isinstance(parsed, (dict, list)):
-                content_text = json.dumps(parsed, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
         content_hash = sha256(content_text.encode("utf-8")).hexdigest()
         with self._connect() as conn:
             cur = conn.execute(
@@ -222,39 +214,6 @@ class QAHistorySidecar:
                 LIMIT 1
                 """,
                 (run_id, report_type),
-            ).fetchone()
-        if not row:
-            return None
-        return {
-            "id": row[0],
-            "run_id": row[1],
-            "agent_id": row[2],
-            "report_type": row[3],
-            "title": row[4],
-            "path": row[5],
-            "content_hash": row[6],
-            "content_text": row[7],
-            "created_at": row[8],
-        }
-
-    def get_latest_report_any_run(
-        self,
-        *,
-        report_type: str,
-    ) -> dict[str, Any] | None:
-        """Fallback: search across ALL runs for the latest report of a given type."""
-        if not self.enabled:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT id, run_id, agent_id, report_type, title, path, content_hash, content_text, created_at
-                FROM qa_reports
-                WHERE report_type = ?
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (report_type,),
             ).fetchone()
         if not row:
             return None
@@ -389,78 +348,3 @@ class QAHistorySidecar:
             conn.commit()
             row_id = cur.lastrowid
         return int(row_id) if row_id is not None else None
-
-    def insert_final_test_pending(
-        self,
-        *,
-        run_id: str,
-        story_id: str,
-        script_report_id: int | None,
-        script_report_path: str | None,
-        executed_from: str,
-        script_glob: str,
-        commands: list[str],
-        payload: dict[str, Any] | None = None,
-    ) -> int | None:
-        if not self.enabled:
-            return None
-        self.ensure_final_test_table()
-        with self._connect() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO final_test (
-                  run_id, story_id, agent_id, script_report_id, script_report_path,
-                  executed_from, script_glob, command_json, result_status,
-                  pass_count, fail_count, error_log, result_json
-                ) VALUES (?, ?, 'tester_routing_agent', ?, ?, ?, ?, ?, 'pending', 0, 0, '', ?)
-                """,
-                (
-                    run_id,
-                    story_id,
-                    script_report_id,
-                    script_report_path,
-                    executed_from,
-                    script_glob,
-                    _json_dumps(commands),
-                    _json_dumps(payload or {}),
-                ),
-            )
-            conn.commit()
-            row_id = cur.lastrowid
-        return int(row_id) if row_id is not None else None
-
-    def update_final_test_result(
-        self,
-        *,
-        final_test_id: int,
-        result_status: str,
-        pass_count: int,
-        fail_count: int,
-        error_log: str,
-        result_payload: dict[str, Any] | None = None,
-    ) -> bool:
-        if not self.enabled:
-            return False
-        self.ensure_final_test_table()
-        with self._connect() as conn:
-            cur = conn.execute(
-                """
-                UPDATE final_test
-                SET result_status = ?,
-                    pass_count = ?,
-                    fail_count = ?,
-                    error_log = ?,
-                    result_json = ?
-                WHERE id = ?
-                """,
-                (
-                    result_status,
-                    int(pass_count),
-                    int(fail_count),
-                    error_log,
-                    _json_dumps(result_payload or {}),
-                    int(final_test_id),
-                ),
-            )
-            conn.commit()
-            return int(cur.rowcount or 0) > 0

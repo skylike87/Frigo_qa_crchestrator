@@ -14,23 +14,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "description": {
-            "type": "string"
-          },
-          "priority": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "description",
-          "priority"
-        ]
+        "additionalProperties": true
       }
     },
     "executable_test_scripts": {
@@ -50,10 +34,9 @@
         },
         "required": [
           "path",
-          "language",
           "content"
         ],
-        "additionalProperties": false
+        "additionalProperties": true
       }
     },
     "assumptions": {
@@ -70,12 +53,7 @@
     }
   },
   "required": [
-    "summary",
-    "test_env_checklist",
-    "test_script_spec",
-    "executable_test_scripts",
-    "assumptions",
-    "risks"
+    "summary"
   ],
-  "additionalProperties": false
+  "additionalProperties": true
 }
