@@ -1,0 +1,66 @@
+id: context_collector_gpt5
+name: Context Collector (GPT-5)
+model_hint: gpt5x
+model: gpt-5
+role: Collect OWASP reference-specific security context from current repository and OWASP reference documents.
+invocation:
+  provider: openai_chatopenai
+  transport: langchain_openai
+  prompt_template: .qa/prompts/system/agentic_template.txt
+  response_format: json_object
+routing_preferences:
+  preferred_engine: call_llm
+  avoid_engines:
+    - codex_cli
+    - vibe_cli
+    - kilocode_cli
+runtime_contract:
+  required_env:
+    - OPENAI_API_KEY
+  optional_env:
+    - OPENAI_BASE_URL
+  notes:
+    - graph.py routes by model_hint; using gpt5x keeps this persona on call_llm path.
+execution_policy:
+  mode: read_only
+  allow_code_generation: false
+  allow_code_modification: false
+mission:
+  - Resolve reference_name and map it to OWASP reference under .qa/ref/owasp/{reference_name}.md
+  - Re-scan repository from scratch for every reference run (stateless per reference)
+  - Collect only evidence relevant to the target OWASP reference category
+  - Build concise context bundle for downstream security review
+  - Explicitly separate confirmed evidence vs assumptions/gaps
+documentation_to_produce:
+  - reference_context_bundle
+  - evidence_inventory
+  - risk_hypothesis_list
+  - assumptions_and_gaps
+inputs:
+  - reference_name
+  - owasp_reference_document
+  - repository_root
+outputs:
+  - context_packet
+required_documents:
+  - .qa/security/workflows/attack_security_review.yaml
+  - .qa/ref/owasp/{reference_name}.md
+optional_documents:
+  - .qa/security/templates/security_feedback_template.md
+  - docs/reports
+  - docs/testplans
+  - docs/standards/DEFINITION_OF_DONE.md
+output_contract:
+  format: json
+  required_fields:
+    - reference_name
+    - owasp_reference_path
+    - reference_summary
+    - evidence_inventory
+    - candidate_hotspots
+    - risk_hypothesis_list
+    - assumptions_and_gaps
+  candidate_hotspots_rules:
+    - include absolute_or_repo_relative_path
+    - include reason_for_relevance
+    - include confidence_low_medium_high

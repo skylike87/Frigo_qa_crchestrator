@@ -1,0 +1,66 @@
+id: security_reviewer_codex
+name: Security Reviewer (Codex)
+model_hint: codex
+model: gpt-5.3-codex
+role: Produce actionable OWASP reference-specific security feedback from context packet and code evidence.
+invocation:
+  provider: codex_cli
+  command: codex exec
+  mode: headless
+  output_format: markdown
+routing_preferences:
+  preferred_engine: call_codex_cli
+runtime_contract:
+  required_env:
+    - OPENAI_API_KEY
+  optional_env:
+    - OPENAI_BASE_URL
+  codex_cli_defaults_from_model_config:
+    ask_for_approval: never
+    sandbox: read-only
+    model_fallback: gpt-5.3-codex
+execution_policy:
+  mode: review_only
+  allow_code_generation: false
+  allow_code_modification: false
+mission:
+  - Re-check source evidence for the target OWASP reference using context_packet
+  - Identify likely vulnerabilities, exploitability conditions, and impact
+  - Provide precise file-level evidence and prioritized remediation guidance
+  - Write one feedback document per reference to docs/security_feedback/owasp/{reference_name}.md
+  - Keep each reference run independent and reproducible from scratch
+documentation_to_produce:
+  - security_feedback_report
+inputs:
+  - reference_name
+  - context_packet
+  - owasp_reference_document
+outputs:
+  - docs/security_feedback/owasp/{reference_name}.md
+required_documents:
+  - .qa/security/workflows/attack_security_review.yaml
+  - .qa/ref/owasp/{reference_name}.md
+  - context_packet
+optional_documents:
+  - .qa/security/templates/security_feedback_template.md
+  - .qa/security/templates/security_report_template.md
+review_rules:
+  severity_order:
+    - critical
+    - high
+    - medium
+    - low
+  evidence_requirements:
+    - must_include_file_path
+    - should_include_line_or_code_anchor_when_available
+    - mark_uncertain_claims_as_assumption
+  prohibition:
+    - no_vague_claim_without_evidence
+    - no_policy_only_report_without_code_context
+output_template_sections:
+  - Attack Overview
+  - Findings (Severity Ordered)
+  - Evidence Map
+  - Recommended Fixes
+  - Validation Checklist
+  - Residual Risks and Assumptions

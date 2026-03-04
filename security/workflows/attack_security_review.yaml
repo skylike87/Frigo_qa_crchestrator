@@ -1,0 +1,98 @@
+id: owasp_reference_security_review
+description: >
+  OWASP reference-specific security review workflow.
+  Collector seeds initial vulnerabilities from OWASP reference,
+  Reviewer appends practical code-level assessment,
+  Reporter generates dated consolidated summary.
+
+inputs:
+  required:
+    - reference_name
+  optional:
+    - run_date_utc
+    - repository_root
+
+path_contract:
+  owasp_reference: .qa/ref/owasp/{reference_name}.md
+  feedback_file: docs/security_feedback/owasp/{reference_name}.md
+  security_report_dir: docs/report/security
+  security_report_file: docs/report/security/security_report_{reference_name}_{run_date_utc}.md
+
+steps:
+  - id: resolve_owasp_reference
+    owner: qa_orchestrator
+    action: validate_file_exists
+    in:
+      - .qa/ref/owasp/{reference_name}.md
+    out:
+      - owasp_reference_verified
+
+  - id: collector_seed_reference_feedback
+    owner: context_collector_gpt5
+    action: seed_reference_findings_markdown
+    reads:
+      - .qa/ref/owasp/{reference_name}.md
+      - repository source tree
+    writes:
+      - docs/security_feedback/owasp/{reference_name}.md
+    requirements:
+      - must_start_from_scratch_each_run
+      - must_write_brief_vulnerability_descriptions
+      - must_not_perform_code_changes
+    output_sections:
+      - OWASP Reference Summary
+      - Candidate Vulnerabilities (Initial)
+      - Assumptions and Gaps
+
+  - id: reviewer_append_reference_feedback
+    owner: security_reviewer_codex
+    action: append_deep_assessment
+    reads:
+      - docs/security_feedback/owasp/{reference_name}.md
+      - .qa/ref/owasp/{reference_name}.md
+      - repository source tree
+    writes:
+      - docs/security_feedback/owasp/{reference_name}.md
+    requirements:
+      - append_only_mode
+      - evidence_must_include_path_anchor
+      - severity_order_critical_to_low
+      - include_fix_recommendations
+    output_sections:
+      - Detailed Findings (Severity Ordered)
+      - Evidence Map
+      - Recommended Fixes
+      - Validation Checklist
+      - Residual Risks
+
+  - id: generate_security_report
+    owner: qa_orchestrator
+    action: compile_reference_scores_and_final_feedback
+    reads:
+      - docs/security_feedback/owasp/{reference_name}.md
+    writes:
+      - docs/report/security/security_report_{reference_name}_{run_date_utc}.md
+    scoring_policy:
+      score_range: 0-100
+      weighting:
+        exploitability: 30
+        impact: 30
+        coverage_confidence: 20
+        remediation_readiness: 20
+    report_sections:
+      - Report Metadata
+      - Attack Scores
+      - Final Feedback
+      - Next Actions
+
+result_contract:
+  required_outputs:
+    - docs/security_feedback/owasp/{reference_name}.md
+    - docs/report/security/security_report_{reference_name}_{run_date_utc}.md
+  required_fields:
+    - reference_name
+    - run_date_utc
+    - score
+    - final_feedback
+    - evidence_count
+    - residual_risk_level
